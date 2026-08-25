@@ -1,51 +1,51 @@
-# MASSO Link UDP Protocol
+# Masso Link UDP Protocol
 
-Full wire-format documentation for the protocol spoken between the **MASSO Link**
-desktop application and a **MASSO G3 / G3-Touch** CNC controller fitted with the
+Full wire-format documentation for the protocol spoken between the **Masso Link**
+desktop application and a **Masso G3 Touch** CNC controller fitted with the
 Wi-Fi / Ethernet module.
 
-Reverse-engineered from **MASSO Link v2.12** (Hind Technology Australia, a 64-bit
+Reverse-engineered from **Masso Link v2.12** (Hind Technology Australia, a 64-bit
 Free Pascal / Lazarus application using the Synapse `TUDPBlockSocket`). Every
 statement below is backed by one or both of:
 
-* **Static analysis** — Ghidra decompilation of the sender thread
+- **Static analysis** — Ghidra decompilation of the sender thread
   (`Send_NC_File_Thread_Class.Execute`), the receiver thread
   (`UDP_Server_Thread_Class.Execute`), the send routine, the CRC routine, and
   the status/timer UI code.
-* **Live capture** — packets recorded with tshark against a real controller
+- **Live capture** — packets recorded with tshark against a real controller
   (a 5-Axis machine running firmware **v5.13**) plus an independent Python
-  re-implementation ([`masso_link.py`](masso_link.py)) that connects, reads
+  re-implementation that connects, reads
   status/tools, and uploads a file — verified byte-for-byte against the app.
 
 > This is unofficial documentation. It is not affiliated with or endorsed by
-> MASSO. Uploading a file only writes it to the controller's USB drive; it does
+> Masso. Uploading a file only writes it to the controller's USB drive; it does
 > **not** run anything. Only one client may talk to a controller at a time.
 
 ---
 
 ## 1. Transport and connection model
 
-| Property | Value |
-|---|---|
-| Protocol | UDP |
+| Property                  | Value                                               |
+| ------------------------- | --------------------------------------------------- |
+| Protocol                  | UDP                                                 |
 | Controller listening port | **65535** (all client → controller packets go here) |
-| Client listening port | **11000** by default (see below) |
-| Byte order | little-endian for all multi-byte integers |
+| Client listening port     | **11000** by default (see below)                    |
+| Byte order                | little-endian for all multi-byte integers           |
 
-**How the controller decides where to reply.** The client does *not* rely on the
+**How the controller decides where to reply.** The client does _not_ rely on the
 controller replying to the request's source port. Instead, the **discovery
 packet carries the port the client wants replies on** (bytes 5–6, little-endian).
-The controller stores `<client-IP, that-port>` and sends *every* subsequent reply
+The controller stores `<client-IP, that-port>` and sends _every_ subsequent reply
 and status broadcast to it.
 
-* MASSO Link binds the first free UDP port in the range **11000–11050** for
+- Masso Link binds the first free UDP port in the range **11000–11050** for
   receiving, and advertises that port in the discovery packet. It sends its
-  requests from a *separate* ephemeral socket. In a capture you therefore see
-  requests coming *from* an ephemeral port but all replies going *to* 11000.
-* A simple client can just bind **one** socket to `0.0.0.0:11000`, advertise
+  requests from a _separate_ ephemeral socket. In a capture you therefore see
+  requests coming _from_ an ephemeral port but all replies going _to_ 11000.
+- A simple client can just bind **one** socket to `0.0.0.0:11000`, advertise
   `11000` in discovery, and use that socket for both send and receive.
-* Because the controller has a single reply target, **do not run two clients (or
-  MASSO Link + a client) at once** — they will steal each other's replies.
+- Because the controller has a single reply target, **do not run two clients (or
+  Masso Link + a client) at once** — they will steal each other's replies.
 
 ---
 
@@ -61,12 +61,12 @@ Every datagram, in both directions:
    \___ CRC-16 ___/  \___ magic ___/
 ```
 
-* **Magic**: constant `03 00` at bytes 2–3.
-* **Type**: one byte at offset 4 (see §3).
-* **CRC**: **CRC-16/XMODEM** — polynomial `0x1021`, init `0x0000`, no input/output
+- **Magic**: constant `03 00` at bytes 2–3.
+- **Type**: one byte at offset 4 (see §3).
+- **CRC**: **CRC-16/XMODEM** — polynomial `0x1021`, init `0x0000`, no input/output
   reflection — computed over **every byte after the CRC field** (i.e. from the
   magic through the end of the padded body). Stored little-endian at bytes 0–1.
-* **Body padding**: the on-wire body (everything after the 2 CRC bytes) is
+- **Body padding**: the on-wire body (everything after the 2 CRC bytes) is
   zero-padded so its length is `(L + 3) & ~3`, where `L` is the intended payload
   length indicator. In practice: assemble `magic + type + payload`, then pad with
   `0x00` up to the next 4-byte boundary. Padding is always ≥ the meaningful
@@ -90,15 +90,15 @@ def crc16_xmodem(data, crc=0x0000):
 
 `type` (byte 4) values used by the app:
 
-| Type | Direction | Name | Reply |
-|------|-----------|------|-------|
-| `0x02` | → | Discovery / identity request | 46-byte identity |
-| `0x03` | → | Config request (handshake) | 10-byte serial |
-| `0x01` | → | Keepalive / status request | 270-byte status |
-| `0x05` | → | Handshake step (optional) | advances the app's state machine |
-| `0x08` | → | Tool-table query | 38-byte tool record |
-| `0x0A` | → | Upload — start | 10-byte ACK |
-| `0x0B` | → | Upload — data chunk | 10-byte ACK |
+| Type   | Direction | Name                         | Reply                            |
+| ------ | --------- | ---------------------------- | -------------------------------- |
+| `0x02` | →         | Discovery / identity request | 46-byte identity                 |
+| `0x03` | →         | Config request (handshake)   | 10-byte serial                   |
+| `0x01` | →         | Keepalive / status request   | 270-byte status                  |
+| `0x05` | →         | Handshake step (optional)    | advances the app's state machine |
+| `0x08` | →         | Tool-table query             | 38-byte tool record              |
+| `0x0A` | →         | Upload — start               | 10-byte ACK                      |
+| `0x0B` | →         | Upload — data chunk          | 10-byte ACK                      |
 
 Replies from the controller reuse the same `type` byte and are distinguished by
 **(length, type)**.
@@ -118,8 +118,8 @@ Reply (46 bytes): identity / version.
  byte:  2  3 4    5  6            n
 ```
 
-* bytes 5–6: controller serial number (u16 LE).
-* a `0x40` (`@`) byte marks the start of the ASCII **version string** (e.g.
+- bytes 5–6: controller serial number (u16 LE).
+- a `0x40` (`@`) byte marks the start of the ASCII **version string** (e.g.
   `5-Axis v5.13`), which is NUL-terminated. (The string begins at byte 13 on the
   captured firmware; locating it via the `@` marker is version-robust.)
 
@@ -127,7 +127,7 @@ Reply (46 bytes): identity / version.
 
 Request payload (9 bytes): a local timestamp
 `hour, minute, second, day, month, year%100, 0, 0, 0`.
-**The controller ignores these bytes** — zeros work equally well; MASSO Link
+**The controller ignores these bytes** — zeros work equally well; Masso Link
 sends the wall clock.
 
 ```
@@ -139,7 +139,7 @@ Reply (10 bytes): `[crc] 03 00 03 | SS SS | 00 00 0A` — bytes 5–6 echo the s
 ### 3.3 Keepalive / status — `0x01`
 
 Request payload (5 bytes): `hour, minute, second, day, month` (ignored by the
-controller). MASSO Link sends this once per second; each one elicits a status
+controller). Masso Link sends this once per second; each one elicits a status
 packet.
 
 ```
@@ -172,19 +172,19 @@ See §5.
 
 Offsets are from the start of the datagram.
 
-| Offset | Size | Field | Notes |
-|-------:|-----:|-------|-------|
-| 0–1 | 2 | CRC | |
-| 2–3 | 2 | magic `03 00` | |
-| 4 | 1 | type `0x01` | |
-| **5** | 1 | **progress %** | 0–100; job completion |
-| **6** | 1 | **run state** | `0x00` = stopped / idle / feed-hold / e-stop; `0x02` = running |
-| 7 | 1 | `0xFF` | constant separator |
-| **8–11** | 4 | **job count** | lifetime jobs counter (u32 LE) |
-| **12** | 1 | **user-prompt flag** | `0x01` = normal; `0x00` = paused waiting for the operator (manual tool change, `M0`/`M1`, cycle-start) |
-| **13–16** | 4 | **line number** | current program line (u32 LE) |
-| **17–…** | var | **current file name** | NUL-terminated ASCII (empty when idle) |
-| …–269 | — | reserved | `0x00` when idle; holds additional run-time data on a busy machine |
+|    Offset | Size | Field                 | Notes                                                                                                  |
+| --------: | ---: | --------------------- | ------------------------------------------------------------------------------------------------------ |
+|       0–1 |    2 | CRC                   |                                                                                                        |
+|       2–3 |    2 | magic `03 00`         |                                                                                                        |
+|         4 |    1 | type `0x01`           |                                                                                                        |
+|     **5** |    1 | **progress %**        | 0–100; job completion                                                                                  |
+|     **6** |    1 | **run state**         | `0x00` = stopped / idle / feed-hold / e-stop; `0x02` = running                                         |
+|         7 |    1 | `0xFF`                | constant separator                                                                                     |
+|  **8–11** |    4 | **job count**         | lifetime jobs counter (u32 LE)                                                                         |
+|    **12** |    1 | **user-prompt flag**  | `0x01` = normal; `0x00` = paused waiting for the operator (manual tool change, `M0`/`M1`, cycle-start) |
+| **13–16** |    4 | **line number**       | current program line (u32 LE)                                                                          |
+|  **17–…** |  var | **current file name** | NUL-terminated ASCII (empty when idle)                                                                 |
+|     …–269 |    — | reserved              | `0x00` when idle; holds additional run-time data on a busy machine                                     |
 
 The app renders the machine-state text and the alarm banners it shows —
 `Machining`, `Machine Stopped`, `Change Tool`, `SPINDLE ALARM`,
@@ -193,7 +193,7 @@ The app renders the machine-state text and the alarm banners it shows —
 user-prompt (byte 12) fields. `Jobs` = byte 8–11, progress ring = byte 5.
 
 **Feed-hold vs. e-stop** are not directly distinguishable: both set byte 6 to
-`0x00` while byte 5 (progress) freezes. A feed hold can be *inferred* when the
+`0x00` while byte 5 (progress) freezes. A feed hold can be _inferred_ when the
 line number (bytes 13–16) stops advancing for ≥ ~1.5 s while the state had been
 running.
 
@@ -207,9 +207,10 @@ already exist on the drive — the protocol does not create directories). The fi
 is stored only; it is not executed.
 
 **Filename rules** (enforced by the app, not the controller):
-* ≤ **15 characters**, ASCII.
-* Path separator is backslash `\` (forward slash is not accepted).
-* The app only offers files whose extension is one of
+
+- ≤ **15 characters**, ASCII.
+- Path separator is backslash `\` (forward slash is not accepted).
+- The app only offers files whose extension is one of
   `.nc .txt .cnc .tap .eia .htg .wiz .gcode .ngc`.
 
 ### 5.1 Start — `0x0A`
@@ -232,17 +233,17 @@ For a plain root upload the path is a single backslash, so bytes 9–13 are
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
 
-| byte 5 | Meaning |
-|-------:|---------|
+| byte 5 | Meaning                                               |
+| -----: | ----------------------------------------------------- |
 | `0x00` | OK — USB present and writable; proceed to send chunks |
-| `0xE9` | **No USB flash drive connected** |
-| other  | generic transfer error |
+| `0xE9` | **No USB flash drive connected**                      |
+|  other | generic transfer error                                |
 
 ### 5.2 Data chunk — `0x0B`
 
 Payload: `chunk index (u32 LE, 0-based)` + `chunk length (u32 LE)` + `data`.
 Maximum data per chunk is **1422 bytes** (`0x58E`). The final chunk carries only
-the remaining bytes (it is *not* padded up to 1422 in the length field).
+the remaining bytes (it is _not_ padded up to 1422 in the length field).
 
 ```
 [crc] 03 00 0B | index(u32) | length(u32) | data[length] | pad
@@ -251,11 +252,11 @@ the remaining bytes (it is *not* padded up to 1422 in the length field).
 **Chunk ACK** (10 bytes, type `0x0B`): byte 5 is the result; bytes 6–9 echo the
 number of chunks the controller has accepted so far.
 
-| byte 5 | Meaning |
-|-------:|---------|
-| `0x00` | OK |
-| `0x01` | **Unable to write file to USB** |
-| `0x02` | **Canceled by the user on the MASSO** (payload spells `USER`) |
+| byte 5 | Meaning                                                       |
+| -----: | ------------------------------------------------------------- |
+| `0x00` | OK                                                            |
+| `0x01` | **Unable to write file to USB**                               |
+| `0x02` | **Canceled by the user on the Masso** (payload spells `USER`) |
 
 ### 5.3 Sequence and timing
 
@@ -272,22 +273,22 @@ client                          controller
   |<-- 0x0B ACK --------------------|      done
 ```
 
-* The controller learns the total size from the start packet and writes exactly
+- The controller learns the total size from the start packet and writes exactly
   that many bytes, so any padding in the last chunk is discarded.
-* MASSO Link waits for each ACK, **retransmits** a chunk if no ACK arrives within
+- Masso Link waits for each ACK, **retransmits** a chunk if no ACK arrives within
   ~100 ms, and **aborts the whole transfer after 15 s** without progress
   (surfacing `ERROR: No response from MASSO`).
 
 ### 5.4 Controller result → message mapping (from the app)
 
-| Condition | Message shown by MASSO Link |
-|---|---|
-| no ACK / timeout | `ERROR: No response from MASSO` |
-| start ACK byte5 = `0xE9` | `No USB Flash drive connected to MASSO` |
-| start ACK byte5 = other ≠ 0 | `An error occurred while transferring file` |
-| chunk ACK byte5 = `0x02` (`USER`) | `File transfer canceled by user on MASSO` |
-| chunk ACK byte5 = `0x01` | `Unable to write file to USB` |
-| all chunks ACKed | success (`File sent`) |
+| Condition                         | Message shown by Masso Link                 |
+| --------------------------------- | ------------------------------------------- |
+| no ACK / timeout                  | `ERROR: No response from MASSO`             |
+| start ACK byte5 = `0xE9`          | `No USB Flash drive connected to MASSO`     |
+| start ACK byte5 = other ≠ 0       | `An error occurred while transferring file` |
+| chunk ACK byte5 = `0x02` (`USER`) | `File transfer canceled by user on MASSO`   |
+| chunk ACK byte5 = `0x01`          | `Unable to write file to USB`               |
+| all chunks ACKed                  | success (`File sent`)                       |
 
 ---
 
@@ -311,7 +312,7 @@ is not required to read status or upload files.)
 ## 7. Discovering controllers on the LAN
 
 Broadcast a discovery packet to `255.255.255.255:65535`; each controller answers
-with its 46-byte identity (serial + version). MASSO Link **v2.14+** with firmware
+with its 46-byte identity (serial + version). Masso Link **v2.14+** with firmware
 **v5.13+** additionally supports connecting by serial number (`G3-xxxxx`) instead
 of a fixed IP; v2.12 (documented here) connects by IP address.
 
@@ -322,23 +323,21 @@ of a fixed IP; v2.12 (documented here) connects by IP address.
 This spec corrects and extends the prior community work
 (`andrewpc/masso-link-protocol-client`, tested on a Lathe running v5.09):
 
-* The status **line number is a `u32`** at bytes 13–16 (not a single byte).
-* The discovery request's `F8 2A` bytes are the client's **reply port** (11000),
+- The status **line number is a `u32`** at bytes 13–16 (not a single byte).
+- The discovery request's `F8 2A` bytes are the client's **reply port** (11000),
   not a magic constant — set them to whatever port you bind.
-* The body is **zero-padded to a 4-byte multiple** via `(len+3) & ~3`.
-* Confirmed the upload chunk cap of **1422 bytes** and the ACK result-code bytes
+- The body is **zero-padded to a 4-byte multiple** via `(len+3) & ~3`.
+- Confirmed the upload chunk cap of **1422 bytes** and the ACK result-code bytes
   directly from the v2.12 binary.
-* Everything here is confirmed on **mill/router-class (5-Axis) firmware v5.13**,
+- Everything here is confirmed on **mill/router-class (5-Axis) firmware v5.13**,
   complementing the earlier lathe-only testing.
 
 ---
 
 ## 9. Notes
 
-* `MASSO_Link.dat` is the app's settings file (machine name, mapped folder, last
-  IP). It is a Lazarus-serialized binary blob and is irrelevant to the protocol.
-* The controller ignores the timestamp bytes in the config/keepalive requests, so
+- The controller ignores the timestamp bytes in the config/keepalive requests, so
   the protocol carries no authentication — anything on the LAN that can reach UDP
   65535 can read status and write files to the USB drive.
-* Verified toolchain: MASSO Link v2.12, controller firmware v5.13, tshark 4.2.6,
-  Ghidra 12.1.3. See [`masso_link.py`](masso_link.py) for a working client.
+- Verified toolchain: Masso Link v2.12, controller firmware v5.13, tshark 4.2.6,
+  Ghidra 12.1.3.
