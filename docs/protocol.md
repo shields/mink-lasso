@@ -1,21 +1,21 @@
 # Masso Link UDP Protocol
 
-Full wire-format documentation for the protocol spoken between the **Masso Link**
-desktop application and a **Masso G3 Touch** CNC controller fitted with the
-Wi-Fi / Ethernet module.
+Full wire-format documentation for the protocol spoken between the **Masso
+Link** desktop application and a **Masso G3 Touch** CNC controller fitted with
+the Wi-Fi / Ethernet module.
 
-Reverse-engineered from **Masso Link v2.12** (Hind Technology Australia, a 64-bit
-Free Pascal / Lazarus application using the Synapse `TUDPBlockSocket`). Every
-statement below is backed by one or both of:
+Reverse-engineered from **Masso Link v2.12** (Hind Technology Australia, a
+64-bit Free Pascal / Lazarus application using the Synapse `TUDPBlockSocket`).
+Every statement below is backed by one or both of:
 
 - **Static analysis** — Ghidra decompilation of the sender thread
   (`Send_NC_File_Thread_Class.Execute`), the receiver thread
   (`UDP_Server_Thread_Class.Execute`), the send routine, the CRC routine, and
   the status/timer UI code.
-- **Live capture** — packets recorded with tshark against a real controller
-  (a 5-Axis machine running firmware **v5.13**) plus an independent Python
-  re-implementation that connects, reads
-  status/tools, and uploads a file — verified byte-for-byte against the app.
+- **Live capture** — packets recorded with tshark against a real controller (a
+  5-Axis machine running firmware **v5.13**) plus an independent Python
+  re-implementation that connects, reads status/tools, and uploads a file —
+  verified byte-for-byte against the app.
 
 > This is unofficial documentation. It is not affiliated with or endorsed by
 > Masso. Uploading a file only writes it to the controller's USB drive; it does
@@ -34,9 +34,9 @@ statement below is backed by one or both of:
 
 **How the controller decides where to reply.** The client does _not_ rely on the
 controller replying to the request's source port. Instead, the **discovery
-packet carries the port the client wants replies on** (bytes 5–6, little-endian).
-The controller stores `<client-IP, that-port>` and sends _every_ subsequent reply
-and status broadcast to it.
+packet carries the port the client wants replies on** (bytes 5–6,
+little-endian). The controller stores `<client-IP, that-port>` and sends _every_
+subsequent reply and status broadcast to it.
 
 - Masso Link binds the first free UDP port in the range **11000–11050** for
   receiving, and advertises that port in the discovery packet. It sends its
@@ -63,13 +63,14 @@ Every datagram, in both directions:
 
 - **Magic**: constant `03 00` at bytes 2–3.
 - **Type**: one byte at offset 4 (see §3).
-- **CRC**: **CRC-16/XMODEM** — polynomial `0x1021`, init `0x0000`, no input/output
-  reflection — computed over **every byte after the CRC field** (i.e. from the
-  magic through the end of the padded body). Stored little-endian at bytes 0–1.
+- **CRC**: **CRC-16/XMODEM** — polynomial `0x1021`, init `0x0000`, no
+  input/output reflection — computed over **every byte after the CRC field**
+  (i.e. from the magic through the end of the padded body). Stored little-endian
+  at bytes 0–1.
 - **Body padding**: the on-wire body (everything after the 2 CRC bytes) is
   zero-padded so its length is `(L + 3) & ~3`, where `L` is the intended payload
-  length indicator. In practice: assemble `magic + type + payload`, then pad with
-  `0x00` up to the next 4-byte boundary. Padding is always ≥ the meaningful
+  length indicator. In practice: assemble `magic + type + payload`, then pad
+  with `0x00` up to the next 4-byte boundary. Padding is always ≥ the meaningful
   content, and trailing zeros are harmless (strings are NUL-terminated).
 
 Reference CRC (Python):
@@ -126,15 +127,15 @@ Reply (46 bytes): identity / version.
 ### 3.2 Config — `0x03`
 
 Request payload (9 bytes): a local timestamp
-`hour, minute, second, day, month, year%100, 0, 0, 0`.
-**The controller ignores these bytes** — zeros work equally well; Masso Link
-sends the wall clock.
+`hour, minute, second, day, month, year%100, 0, 0, 0`. **The controller ignores
+these bytes** — zeros work equally well; Masso Link sends the wall clock.
 
 ```
 [crc] 03 00 03 | 0E 07 1E 18 08 1A 00 00 00   ; 14:07:30, day 24, month 08, year 26
 ```
 
-Reply (10 bytes): `[crc] 03 00 03 | SS SS | 00 00 0A` — bytes 5–6 echo the serial.
+Reply (10 bytes): `[crc] 03 00 03 | SS SS | 00 00 0A` — bytes 5–6 echo the
+serial.
 
 ### 3.3 Keepalive / status — `0x01`
 
@@ -150,17 +151,17 @@ Reply: the **270-byte status packet** (§4).
 
 ### 3.4 Tool query — `0x08`
 
-Request payload: `index (1 byte, 1..N)` + `22 2C 1C 0B` (constant; only the index
-matters).
+Request payload: `index (1 byte, 1..N)` + `22 2C 1C 0B` (constant; only the
+index matters).
 
 ```
 [crc] 03 00 08 | 01 | 22 2C 1C 0B            ; query tool #1
 ```
 
-Reply (38 bytes): `[crc] 03 00 08 | index | name... 00`
-— byte 5 is the tool index, bytes 6.. are the NUL-terminated tool name.
-The app iterates indices 1..118 (mill/router) or 1..100 (lathe) and stops at the
-first empty name. (On a machine with no named tools, replies carry empty names.)
+Reply (38 bytes): `[crc] 03 00 08 | index | name... 00` — byte 5 is the tool
+index, bytes 6.. are the NUL-terminated tool name. The app iterates indices
+1..118 (mill/router) or 1..100 (lathe) and stops at the first empty name. (On a
+machine with no named tools, replies carry empty names.)
 
 ### 3.5 Upload — `0x0A` (start) and `0x0B` (data)
 
@@ -223,12 +224,15 @@ Payload:
 ```
 
 For a plain root upload the path is a single backslash, so bytes 9–13 are
-`00 00 01 5C 00`, immediately followed by the filename and its NUL. Example for a
-87-byte file named `CLTEST.NC`:
+`00 00 01 5C 00`, immediately followed by the filename and its NUL. The name
+field is a fixed **16 bytes** (15 characters plus NUL, zero-filled), so a root
+upload's start packet is always 30 bytes on the wire — more than the generic
+4-byte padding rule of §2 would give. Captured example for an 87-byte file named
+`CLTEST.NC`:
 
 ```
-[crc] 03 00 0A 57 00 00 00 00 00 01 5C 00 43 4C 54 45 53 54 2E 4E 43 00 00 00 00 00 00
-      \magic/ ty \_ size=0x57 _/ \__/ pl \/ \/ \___ "CLTEST.NC" ______/ \0 \_ pad _/
+06 39 03 00 0A 57 00 00 00 00 00 01 5C 00 43 4C 54 45 53 54 2E 4E 43 00 00 00 00 00 00 00
+\crc/ \magic/ ty \_ size=0x57 _/ \__/ pl \/ \/ \___ "CLTEST.NC" ______/ \0 \_ name fill _/
 ```
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
@@ -275,8 +279,8 @@ client                          controller
 
 - The controller learns the total size from the start packet and writes exactly
   that many bytes, so any padding in the last chunk is discarded.
-- Masso Link waits for each ACK, **retransmits** a chunk if no ACK arrives within
-  ~100 ms, and **aborts the whole transfer after 15 s** without progress
+- Masso Link waits for each ACK, **retransmits** a chunk if no ACK arrives
+  within ~100 ms, and **aborts the whole transfer after 15 s** without progress
   (surfacing `ERROR: No response from MASSO`).
 
 ### 5.4 Controller result → message mapping (from the app)
@@ -312,9 +316,10 @@ is not required to read status or upload files.)
 ## 7. Discovering controllers on the LAN
 
 Broadcast a discovery packet to `255.255.255.255:65535`; each controller answers
-with its 46-byte identity (serial + version). Masso Link **v2.14+** with firmware
-**v5.13+** additionally supports connecting by serial number (`G3-xxxxx`) instead
-of a fixed IP; v2.12 (documented here) connects by IP address.
+with its 46-byte identity (serial + version). Masso Link **v2.14+** with
+firmware **v5.13+** additionally supports connecting by serial number
+(`G3-xxxxx`) instead of a fixed IP; v2.12 (documented here) connects by IP
+address.
 
 ---
 
@@ -336,8 +341,8 @@ This spec corrects and extends the prior community work
 
 ## 9. Notes
 
-- The controller ignores the timestamp bytes in the config/keepalive requests, so
-  the protocol carries no authentication — anything on the LAN that can reach UDP
-  65535 can read status and write files to the USB drive.
+- The controller ignores the timestamp bytes in the config/keepalive requests,
+  so the protocol carries no authentication — anything on the LAN that can reach
+  UDP 65535 can read status and write files to the USB drive.
 - Verified toolchain: Masso Link v2.12, controller firmware v5.13, tshark 4.2.6,
   Ghidra 12.1.3.
