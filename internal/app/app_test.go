@@ -789,14 +789,15 @@ func TestMainHeadlessPersistsLastAddressAndDiscardsEvents(t *testing.T) {
 // signal.NotifyContext (installed while Main's run() is active) should
 // consume.
 //
-//nolint:paralleltest // sends a real, process-wide SIGINT; must not race other tests' signal handling.
+//nolint:paralleltest // delivers a real, process-wide interrupt; must not race other tests' signal handling.
 func TestMainRealNotifyAndEngineDefaults(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "config.json")
+	stdout := &syncBuffer{}
 	stderr := &bytes.Buffer{}
 
 	d := Deps{
-		Stdout:         io.Discard,
+		Stdout:         stdout,
 		Stderr:         stderr,
 		UserCacheDir:   func() (string, error) { return filepath.Join(tmp, "cache"), nil },
 		Executable:     func() (string, error) { return filepath.Join(tmp, "bin", "mink-lasso"), nil },
@@ -808,29 +809,27 @@ func TestMainRealNotifyAndEngineDefaults(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- Main([]string{"-headless", "-config", configPath}, d) }()
 
-	// Give Main time to reach New's real socket bind and run()'s call
-	// to signal.NotifyContext before signaling.
-	time.Sleep(300 * time.Millisecond)
-
-	// If the real socket bind failed (e.g. the port range is already
-	// held, or this environment blocks it), Main returns before
-	// run()'s signal.NotifyContext is ever installed. Sending SIGINT
-	// in that case would hit the process's default disposition and
-	// kill the whole test binary instead of just failing this test.
-	select {
-	case code := <-done:
-		t.Fatalf("Main returned %d before signal.NotifyContext could have been installed "+
-			"(the real engine socket bind likely failed); stderr: %s", code, stderr.String())
-	default:
+	// run logs this line right after installing signal.NotifyContext, so
+	// seeing it is the only safe moment to interrupt: an interrupt before
+	// that would hit the process's default disposition and kill the whole
+	// test binary instead of just failing this test. If the real socket
+	// bind fails (the port range is already held, or this environment
+	// blocks it), Main returns first instead.
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(stdout.String(), "running headless") {
+		select {
+		case code := <-done:
+			t.Fatalf("Main returned %d before installing its signal handler "+
+				"(the real engine socket bind likely failed); stderr: %s", code, stderr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Main never logged that it is running headless")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
-	proc, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess: %v", err)
-	}
-	if err := proc.Signal(os.Interrupt); err != nil {
-		t.Fatalf("Signal: %v", err)
-	}
+	interruptSelf(t)
 
 	select {
 	case code := <-done:
@@ -838,8 +837,29 @@ func TestMainRealNotifyAndEngineDefaults(t *testing.T) {
 			t.Errorf("Main = %d, want 0; stderr: %s", code, stderr.String())
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Main did not return after SIGINT")
+		t.Fatal("Main did not return after the interrupt")
 	}
+}
+
+// syncBuffer is a bytes.Buffer that one goroutine may read while another
+// writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
 }
 
 func TestMainLastAddressPersistFailureIsLoggedNotFatal(t *testing.T) {

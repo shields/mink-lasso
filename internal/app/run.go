@@ -45,7 +45,20 @@ func run(
 	guiDone := make(chan struct{})
 	forwarderDone := make(chan struct{})
 
-	go forward(eng, store, logger, f.headless, guiCh, guiDone, forwarderDone)
+	relay := func(engine.Event) {}
+	if !f.headless {
+		relay = func(ev engine.Event) {
+			select {
+			case guiCh <- ev:
+			case <-guiDone:
+			}
+		}
+	}
+	go func() {
+		defer close(forwarderDone)
+		defer close(guiCh)
+		forward(eng, store, logger, relay)
+	}()
 
 	var runErr error
 	if f.headless {
@@ -88,22 +101,9 @@ func run(
 
 // forward drains eng.Events() until it is closed (required for eng.Run to
 // return, per its doc comment), persisting a newly connected address to
-// disk and, outside headless mode, relaying every event to guiCh without
-// ever blocking a GUI that has already returned.
-//
-//nolint:revive // headless mirrors Main's own -headless mode switch, not a public API smell
-func forward(
-	eng Engine,
-	store *configStore,
-	logger *slog.Logger,
-	headless bool,
-	guiCh chan<- engine.Event,
-	guiDone <-chan struct{},
-	forwarderDone chan<- struct{},
-) {
-	defer close(forwarderDone)
-	defer close(guiCh)
-
+// disk and handing every event to relay: a no-op in headless mode, and
+// otherwise a send to the GUI that gives up once the GUI has returned.
+func forward(eng Engine, store *configStore, logger *slog.Logger, relay func(engine.Event)) {
 	for ev := range eng.Events() {
 		if cs, isConn := ev.(engine.ConnState); isConn && cs.Kind == engine.Connected && cs.Addr != nil {
 			if err := store.persistLastAddress(cs.Addr.String()); err != nil {
@@ -111,13 +111,6 @@ func forward(
 			}
 		}
 
-		if headless {
-			continue
-		}
-
-		select {
-		case guiCh <- ev:
-		case <-guiDone:
-		}
+		relay(ev)
 	}
 }

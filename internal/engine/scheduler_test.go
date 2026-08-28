@@ -561,24 +561,25 @@ func TestSchedulerChangedDuringSendingSendsTwice(t *testing.T) {
 	path := writeFile(t, dir, "G.NC", bytes.Repeat([]byte{'a'}, size))
 	waitForEvent(t, events, isTransferEvent("G.NC", Sending))
 
-	// Overwrite (atomically, so the in-flight read of the stale content is
-	// undisturbed) while the first transfer is still going; the watcher
-	// needs another full settle window to notice.
-	overwriteFileAtomic(t, path, bytes.Repeat([]byte{'b'}, size))
+	// Change the file while the first transfer is still going (how, and
+	// what the resend can then deliver, depends on the platform; see
+	// changeDuringSending); the watcher needs another full settle window
+	// to notice.
+	want := changeDuringSending(t, path, size)
 
 	waitForEvent(t, events, isTransferEvent("G.NC", Sent))
 	waitForEvent(t, events, isTransferEvent("G.NC", Sending))
 	waitForEvent(t, events, isTransferEvent("G.NC", Sent))
 
 	// The whole point of this scenario is that the resend delivers the
-	// newer bytes, not a stale reread of the original content (finding 7):
-	// confirm the simulator actually holds the 'b'-filled overwrite.
+	// file as it is after the change, not a stale reread (finding 7):
+	// confirm the simulator holds exactly that.
 	got, ok := s.File("G.NC")
 	if !ok {
 		t.Fatal("sim did not receive G.NC")
 	}
-	if !bytes.Equal(got, bytes.Repeat([]byte{'b'}, size)) {
-		t.Error("sim's final G.NC content is not the overwritten ('b'-filled) payload")
+	if !bytes.Equal(got, want) {
+		t.Error("sim's final G.NC content is not what the resend should have delivered")
 	}
 }
 
