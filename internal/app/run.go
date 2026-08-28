@@ -65,6 +65,10 @@ func run(
 		// The built exe has no console (see README.md's "Command line"
 		// section), so Ctrl+C only reaches this process under `go run`;
 		// taskkill/Task Manager works either way.
+		//
+		// TestMainStopsOnInterrupt greps this exact wording to know when
+		// it's safe to interrupt the child process it runs Main in; keep
+		// "running headless" in the message if you reword it.
 		logger.Info("running headless; stop it with taskkill, or Ctrl+C under go run")
 		<-ctx.Done()
 		cancel()
