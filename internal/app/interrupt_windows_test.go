@@ -17,34 +17,41 @@
 package app
 
 import (
+	"os/exec"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
 
-// interruptSelf delivers the Windows equivalent of SIGINT to this process.
+// childProcAttr puts the child in a process group of its own, so that a
+// console control event can be aimed at it alone.
+func childProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+}
+
+// ensureConsole gives a test binary that was started without a console (by
+// a runner service, say) one to raise console control events on; a child
+// started afterwards inherits it. Failure means a console already exists.
+func ensureConsole() {
+	_ = callBool(windows.NewLazySystemDLL("kernel32.dll").NewProc("AllocConsole"))
+}
+
+// interruptChild delivers the Windows equivalent of SIGINT to the child.
 // Windows has no per-process signals — os.Process.Signal(os.Interrupt) is
-// unsupported — and GenerateConsoleCtrlEvent reaches every process attached
-// to the calling process's console, go test, make, and the CI shell
-// included. So the test binary detaches from the inherited console and
-// allocates a private one, which nothing else is attached to, before
-// raising the event there. It raises Ctrl+Break rather than Ctrl+C because
-// a parent that ignores Ctrl+C (SetConsoleCtrlHandler(NULL, TRUE)) passes
-// that on to its children, whereas Ctrl+Break cannot be ignored; Go's
+// unsupported — and GenerateConsoleCtrlEvent reaches every process in the
+// named process group that shares the caller's console, which is why the
+// child has a group of its own: the same arrangement as the Ctrl+Break test
+// in Go's own os/signal package. It raises Ctrl+Break rather than Ctrl+C
+// because CREATE_NEW_PROCESS_GROUP disables Ctrl+C in the child; Go's
 // runtime turns either into os.Interrupt.
-func interruptSelf(t *testing.T) {
+func interruptChild(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
-
-	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
-	freeConsole := kernel32.NewProc("FreeConsole")
-	// Failing here only means there was no console to detach from.
-	_ = callBool(freeConsole)
-	if err := callBool(kernel32.NewProc("AllocConsole")); err != nil {
-		t.Fatalf("AllocConsole: %v", err)
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		t.Fatalf("child pid = %d", pid)
 	}
-	t.Cleanup(func() { _ = callBool(freeConsole) })
-
-	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, 0); err != nil {
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid)); err != nil {
 		t.Fatalf("GenerateConsoleCtrlEvent: %v", err)
 	}
 }

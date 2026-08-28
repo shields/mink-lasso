@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -782,63 +784,147 @@ func TestMainHeadlessPersistsLastAddressAndDiscardsEvents(t *testing.T) {
 	}
 }
 
-// TestMainRealNotifyAndEngineDefaults exercises Deps.Notify's and
-// Deps.NewEngine's real (non-test-double) defaults: signal.NotifyContext
-// and engine.New actually binding a socket. It is not parallel: it sends a
-// real SIGINT to this process, which only this test's own
-// signal.NotifyContext (installed while Main's run() is active) should
-// consume.
+// childDirEnv names the directory a re-executed test binary runs Main
+// under; see TestMainChildProcess.
+const childDirEnv = "MINK_LASSO_TEST_CHILD_DIR"
+
+// TestMainStopsOnInterrupt runs Main headless with its real Notify and
+// NewEngine defaults — a real signal handler and a real UDP socket — and
+// interrupts it once it reports that it is running, expecting a clean exit.
+// Main runs in a child process (this test binary re-executed; see
+// TestMainChildProcess) because Windows offers no way for a process to
+// interrupt itself; see interruptChild.
 //
-//nolint:paralleltest // delivers a real, process-wide interrupt; must not race other tests' signal handling.
-func TestMainRealNotifyAndEngineDefaults(t *testing.T) {
-	tmp := t.TempDir()
-	configPath := filepath.Join(tmp, "config.json")
-	stdout := &syncBuffer{}
-	stderr := &bytes.Buffer{}
-
-	d := Deps{
-		Stdout:         stdout,
-		Stderr:         stderr,
-		UserCacheDir:   func() (string, error) { return filepath.Join(tmp, "cache"), nil },
-		Executable:     func() (string, error) { return filepath.Join(tmp, "bin", "mink-lasso"), nil },
-		SingleInstance: func(string) (func(), error) { return func() {}, nil },
-		// Notify and NewEngine are left nil on purpose, to exercise
-		// their real defaults.
+//nolint:paralleltest // the child binds the real listen-port range; keep the port-holding tests out of its way.
+func TestMainStopsOnInterrupt(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
 	}
+	dir := t.TempDir()
 
-	done := make(chan int, 1)
-	go func() { done <- Main([]string{"-headless", "-config", configPath}, d) }()
+	stdout, stderr := &syncBuffer{}, &syncBuffer{}
+	cmd := exec.Command(exe, "-test.run=^TestMainChildProcess$")
+	cmd.Env = append(os.Environ(), childDirEnv+"="+dir)
+	cmd.SysProcAttr = childProcAttr()
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	ensureConsole()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Harmless once the child has exited; otherwise it keeps a failed run
+	// from leaking the child and its open log file.
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
 	// run logs this line right after installing signal.NotifyContext, so
 	// seeing it is the only safe moment to interrupt: an interrupt before
-	// that would hit the process's default disposition and kill the whole
-	// test binary instead of just failing this test. If the real socket
-	// bind fails (the port range is already held, or this environment
-	// blocks it), Main returns first instead.
-	deadline := time.Now().Add(10 * time.Second)
+	// that would hit the child's default disposition and make it exit
+	// non-zero. If the real socket bind fails (the port range is already
+	// held, or this environment blocks it), the child exits first instead.
+	deadline := time.Now().Add(15 * time.Second)
 	for !strings.Contains(stdout.String(), "running headless") {
 		select {
-		case code := <-done:
-			t.Fatalf("Main returned %d before installing its signal handler "+
-				"(the real engine socket bind likely failed); stderr: %s", code, stderr.String())
+		case err := <-done:
+			t.Fatalf("child exited (%v) before installing its signal handler "+
+				"(the real engine socket bind likely failed); stdout: %s; stderr: %s",
+				err, stdout.String(), stderr.String())
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("Main never logged that it is running headless")
+			t.Fatal("child never logged that it is running headless")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	interruptSelf(t)
+	interruptChild(t, cmd)
 
 	select {
-	case code := <-done:
-		if code != 0 {
-			t.Errorf("Main = %d, want 0; stderr: %s", code, stderr.String())
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("child exited with %v after the interrupt; stdout: %s; stderr: %s",
+				err, stdout.String(), stderr.String())
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Main did not return after the interrupt")
+	case <-time.After(15 * time.Second):
+		t.Fatal("child did not exit after the interrupt")
 	}
+	if !strings.Contains(stdout.String(), "Main returned 0") {
+		t.Errorf("child did not report a clean Main return; stdout: %s; stderr: %s",
+			stdout.String(), stderr.String())
+	}
+}
+
+// TestMainChildProcess is the child half of TestMainStopsOnInterrupt: when
+// this test binary is re-executed with childDirEnv set, it runs Main
+// headless with the real Notify and NewEngine defaults, keeping its config
+// and logs under that directory, and reports Main's exit code on stdout.
+// Run any other way it does nothing.
+func TestMainChildProcess(t *testing.T) {
+	t.Parallel()
+	dir := os.Getenv(childDirEnv)
+	if dir == "" {
+		return
+	}
+
+	d := Deps{
+		Stdout:         os.Stdout,
+		Stderr:         os.Stderr,
+		UserCacheDir:   func() (string, error) { return filepath.Join(dir, "cache"), nil },
+		Executable:     func() (string, error) { return filepath.Join(dir, "bin", "mink-lasso"), nil },
+		SingleInstance: func(string) (func(), error) { return func() {}, nil },
+		// Notify and NewEngine are left nil on purpose: their real
+		// defaults are the point.
+	}
+	code := Main([]string{"-headless", "-config", filepath.Join(dir, "config.json")}, d)
+	fmt.Fprintf(os.Stdout, "Main returned %d\n", code)
+	if code != 0 {
+		t.Errorf("Main = %d, want 0", code)
+	}
+}
+
+// TestDefaultNotifyFollowsParentContext covers the default Notify in
+// process: the context it returns must end with its parent, not only on a
+// signal (which TestMainStopsOnInterrupt proves separately).
+func TestDefaultNotifyFollowsParentContext(t *testing.T) {
+	t.Parallel()
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx, cancel := Deps{}.withDefaults().Notify(parent)
+	defer cancel()
+
+	cancelParent()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("default Notify's context did not follow its parent")
+	}
+}
+
+// TestDefaultNewEngineBuildsARealEngine covers the default NewEngine's
+// success path in process. It binds a real listen socket, so the engine is
+// run to completion on an already-canceled context to release it.
+func TestDefaultNewEngineBuildsARealEngine(t *testing.T) {
+	t.Parallel()
+	eng, err := Deps{}.withDefaults().NewEngine(engine.Options{Config: config.Default()})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	drained := make(chan int, 1)
+	go func() {
+		n := 0
+		for range eng.Events() {
+			n++
+		}
+		drained <- n
+	}()
+	if err := eng.Run(ctx); err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	t.Logf("engine emitted %d events while shutting down", <-drained)
 }
 
 // syncBuffer is a bytes.Buffer that one goroutine may read while another

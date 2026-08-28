@@ -18,18 +18,23 @@ package app
 
 import (
 	"os"
+	"os/exec"
+	"syscall"
 	"testing"
 )
 
-// interruptSelf delivers a real SIGINT to this process, exactly what Ctrl+C
+// childProcAttr is nil here: interruptChild signals the child by pid, so it
+// needs no process group of its own.
+func childProcAttr() *syscall.SysProcAttr { return nil }
+
+// ensureConsole is a no-op: signals need no console.
+func ensureConsole() {}
+
+// interruptChild delivers a real SIGINT to the child, exactly what Ctrl+C
 // or kill -INT does.
-func interruptSelf(t *testing.T) {
+func interruptChild(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
-	proc, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess: %v", err)
-	}
-	if err := proc.Signal(os.Interrupt); err != nil {
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
 }
