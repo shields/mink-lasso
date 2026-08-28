@@ -958,13 +958,14 @@ func TestMainLastAddressPersistFailureIsLoggedNotFatal(t *testing.T) {
 	if err := config.Default().Save(configPath); err != nil {
 		t.Fatal(err)
 	}
-	// Read-only directory: the initial Load above already succeeded, but
-	// the later LastAddress persist (a temp-file-then-rename) cannot
-	// write, so it must fail without taking Main down.
-	if err := os.Chmod(dir, 0o500); err != nil {
+	// The initial Load above already succeeded, but the later LastAddress
+	// persist writes config.json.tmp and renames it into place; a
+	// directory squatting on that name makes the write fail on every
+	// platform (a read-only directory would not stop it on Windows), and
+	// the failure must not take Main down.
+	if err := os.Mkdir(configPath+".tmp", 0o750); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	fe := newFakeEngine()
 	d.NewEngine = func(engine.Options) (Engine, error) { return fe, nil }
@@ -979,6 +980,9 @@ func TestMainLastAddressPersistFailureIsLoggedNotFatal(t *testing.T) {
 
 	if code := <-done; code != 0 {
 		t.Errorf("Main = %d, want 0 (a persist failure must not be fatal)", code)
+	}
+	if out := env.Stdout.String(); !strings.Contains(out, "could not persist last-known address") {
+		t.Errorf("persist failure was not logged; stdout: %s", out)
 	}
 }
 

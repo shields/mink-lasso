@@ -60,7 +60,8 @@ coverage:
 	go test $(GO_TEST_FLAGS) -covermode=atomic -coverprofile=$(COVERAGE_FILE) $(COVER_PKGS)
 	@LC_ALL=C awk 'NR>1{t+=$$2;if($$3>0)c+=$$2} \
 	  END{printf "Coverage: %.1f%%\n",(t>0?100*c/t:0); \
-	  if(c!=t){print "FAIL: coverage is not 100.0%";exit 1}}' $(COVERAGE_FILE)
+	  if(c!=t){print "FAIL: coverage is not 100.0%; uncovered blocks:";exit 1}}' $(COVERAGE_FILE) \
+	  || { awk 'NR>1&&$$2>0&&$$3==0' $(COVERAGE_FILE); exit 1; }
 
 version:
 	@echo $(VERSION)
