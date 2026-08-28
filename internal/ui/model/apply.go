@@ -137,17 +137,19 @@ func (m *Model) applyTransferEvent(e engine.TransferEvent) Changes {
 		Path:      e.Path,
 	}
 
+	before := m.pendingCountLocked()
 	_, existed := m.transfers[e.Name]
 	m.transfers[e.Name] = &transferEntry{row: row, at: e.At}
 	if !existed {
 		m.evictOldestTerminal()
 	}
 
-	// A transfer entering or leaving the pending count changes both the
-	// Watch panel's PendingText and the tray tooltip, which reads the same
-	// count (see pendingCountLocked) — Tray must move whenever Watch does
-	// here, or the tooltip goes stale until an unrelated ConnState event.
-	changes := Changes{Transfers: true, Watch: true, Tray: true}
+	// The Watch panel's PendingText and the tray tooltip both read the
+	// pending count (see pendingCountLocked), so they move together — and
+	// only when the count actually changes, not on every progress tick of
+	// a file that is already Sending.
+	moved := m.pendingCountLocked() != before
+	changes := Changes{Transfers: true, Watch: moved, Tray: moved}
 	switch e.State {
 	case engine.Sent:
 		changes.Balloon = &Balloon{Kind: BalloonInfo, Title: "File sent", Text: e.Name + " sent"}

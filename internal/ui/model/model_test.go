@@ -16,7 +16,9 @@ package model
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
+	"testing"
 
 	"msrl.dev/mink-lasso/internal/config"
 )
@@ -99,3 +101,62 @@ func (f *fakeSaver) save(cfg config.Config) error {
 }
 
 var errSaveFailed = errors.New("simulated save failure")
+
+func TestSetEngine(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	// Before an engine is set, actions are local-only, as with a nil
+	// Options.Engine.
+	m.RefreshTools()
+	if err := m.SendFile("A.NC"); !errors.Is(err, ErrNoEngine) {
+		t.Errorf("SendFile before SetEngine = %v, want ErrNoEngine", err)
+	}
+
+	fc := &fakeControl{}
+	m.SetEngine(fc)
+	m.RefreshTools()
+	if err := m.SendFile("A.NC"); err != nil {
+		t.Errorf("SendFile after SetEngine = %v, want nil", err)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.refreshed != 1 || len(fc.sent) != 1 {
+		t.Errorf("refreshed = %d, sent = %v; want 1 and one file", fc.refreshed, fc.sent)
+	}
+}
+
+func TestSetOnChange(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	logger := slog.New(m.LogHandler(nil))
+
+	// No callback yet: the line is kept, nothing is called.
+	logger.Info("one")
+
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	m.SetOnChange(func(c Changes) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if !c.Log {
+			t.Errorf("OnChange(%+v), want Log set", c)
+		}
+	})
+	logger.Info("two")
+
+	m.SetOnChange(nil)
+	logger.Info("three")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("OnChange called %d times, want 1", calls)
+	}
+	if got := len(m.LogLines()); got != 3 {
+		t.Errorf("LogLines = %d lines, want 3", got)
+	}
+}

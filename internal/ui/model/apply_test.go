@@ -324,8 +324,8 @@ func TestApplyTransferEventBalloons(t *testing.T) {
 			t.Parallel()
 			m := New(Options{})
 			changes := m.Apply(engine.TransferEvent{Name: "A.NC", State: tc.state, Message: "boom", At: time.Now()})
-			if !changes.Transfers || !changes.Watch {
-				t.Errorf("changes = %+v, want Transfers/Watch set", changes)
+			if !changes.Transfers {
+				t.Errorf("changes = %+v, want Transfers set", changes)
 			}
 			if tc.wantNone {
 				if changes.Balloon != nil {
@@ -485,3 +485,34 @@ func TestApplyUnknownEventIsNoOp(t *testing.T) {
 // unknownEvent implements engine.Event's marker method so Apply's default
 // case is reachable; it is otherwise never produced by internal/engine.
 type unknownEvent struct{ engine.ConnState }
+
+func TestApplyTransferEventWatchAndTrayFollowPendingCount(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	at := time.Now()
+	steps := []struct {
+		name  string
+		event engine.TransferEvent
+		want  bool
+	}{
+		{"pending joins the count", engine.TransferEvent{Name: "A.NC", State: engine.Pending, At: at}, true},
+		{"waiting stays in the count", engine.TransferEvent{Name: "A.NC", State: engine.Waiting, At: at}, false},
+		{"sending leaves the count", engine.TransferEvent{Name: "A.NC", State: engine.Sending, At: at}, true},
+		{"progress tick", engine.TransferEvent{Name: "A.NC", State: engine.Sending, Sent: 1422, At: at}, false},
+		{"sent", engine.TransferEvent{Name: "A.NC", State: engine.Sent, At: at}, false},
+		{
+			"manual pending is not counted",
+			engine.TransferEvent{Name: "B.NC", State: engine.Pending, Manual: true, At: at},
+			false,
+		},
+	}
+	for _, s := range steps {
+		changes := m.Apply(s.event)
+		if !changes.Transfers {
+			t.Errorf("%s: Transfers = false, want true", s.name)
+		}
+		if changes.Watch != s.want || changes.Tray != s.want {
+			t.Errorf("%s: Watch = %v, Tray = %v, want both %v", s.name, changes.Watch, changes.Tray, s.want)
+		}
+	}
+}

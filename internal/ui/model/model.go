@@ -193,3 +193,23 @@ func New(opts Options) *Model {
 	}
 	return m
 }
+
+// SetEngine replaces the engine the action methods drive. It exists so the
+// model can be built before the engine — the engine's logger must include
+// LogHandler, which needs a Model — and pointed at the real engine once
+// there is one. Calls that arrive in between behave as with a nil
+// Options.Engine.
+func (m *Model) SetEngine(eng Control) {
+	m.mu.Lock()
+	m.engine = eng
+	m.mu.Unlock()
+}
+
+// SetOnChange replaces the OnChange callback (see Options.OnChange). The
+// binding registers itself here once it has a UI thread to marshal onto;
+// nil clears it.
+func (m *Model) SetOnChange(fn func(Changes)) {
+	m.mu.Lock()
+	m.onChange = fn
+	m.mu.Unlock()
+}

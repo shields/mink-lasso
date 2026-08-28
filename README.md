@@ -42,15 +42,15 @@ broadcast, connects, and starts watching the folder.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: file appears in the watched folder
-    Pending --> Waiting: still being written, in use, machine busy, or disconnected
+    [*] --> Pending: file settles in the watched folder
+    [*] --> Rejected: file name invalid
+    Pending --> Waiting: machine busy or controller unreachable
     Waiting --> Pending
-    Pending --> Sending: settled and machine idle
+    Pending --> Sending: nothing blocking it
     Sending --> Sent: moved to sent/
-    Sending --> Failed: no response, no USB drive, write error
+    Sending --> Failed: no response, no USB drive, write error, or canceled on the Masso
     Failed --> Pending: retried after 5 s, 10 s, 30 s, then every 60 s
-    Sending --> Canceled: operator canceled on the Masso
-    Canceled --> Pending: file changed or Retry clicked
+    Failed --> Pending: file changes, or Retry clicked
 ```
 
 A file is sent when it has **settled**: its size and modification time have not
@@ -106,8 +106,9 @@ netsh advfirewall firewall add rule name="mink-lasso UDP" dir=in action=allow pr
 
 ## Configuration
 
-Settings are saved to `%APPDATA%\mink-lasso\config.json` when you click Apply in
-the app; the file is also readable and editable by hand:
+Settings are saved to `%APPDATA%\mink-lasso\config.json` as you change them in
+the app—the serial number when you click Apply, the watch folder and "Upload
+while machining" immediately—and the file is also readable and editable by hand:
 
 | Key                    | Default                                         | Meaning                                                      |
 | ---------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
@@ -125,7 +126,7 @@ the app; the file is also readable and editable by hand:
 | `startMinimized`       | `false`                                         | Start hidden in the notification area                        |
 | `logLevel`             | `info`                                          | `debug`, `info`, `warn`, or `error`                          |
 
-Logs go to `%LOCALAPPDATA%\mink-lasso\logs\mink-lasso.log` (5 MB, five files
+Logs go to `%LOCALAPPDATA%\mink-lasso\logs\mink-lasso.log` (5 MiB, five files
 kept).
 
 ## Command line
@@ -134,12 +135,25 @@ kept).
 mink-lasso.exe [-headless] [-config FILE] [-log-dir DIR] [-watch DIR] [-serial G3-12345] [-address HOST:PORT] [-log-level LEVEL] [-version]
 ```
 
-`-headless` runs without a window, logging to standard output as well as the log
-file, until the process is stopped (`Ctrl+C` from a console, or `taskkill`). The
-other flags override the corresponding configuration values for that run without
-saving them. `-version` prints the version, which follows
-[gitcalver](https://gitcalver.org/): `20260825.2` is the second build from
-August 25, 2026 (UTC).
+`-headless` runs without a window, logging to the log file and also to standard
+output—useful when stdout is redirected, as `make run` and the integration tests
+do. The other flags override the corresponding configuration values for that run
+only; they are never written to the config file by themselves—but clicking
+Apply, Browse…, or the "Upload while machining" checkbox in the GUI saves the
+values currently in effect, including any active override. `-version` prints the
+version, which follows [gitcalver](https://gitcalver.org/): `20260825.2` is the
+second build from August 25, 2026 (UTC).
+
+`mink-lasso.exe` never has a console window, even with `-headless`: nothing
+reads its standard output unless the launcher redirected it, and `Ctrl+C` has
+nothing to reach. Stop it with `taskkill /IM mink-lasso.exe /F` or from Task
+Manager. `make run` (`go run`, on any OS) builds a console program instead, so
+`Ctrl+C` works there.
+
+If another instance is already running, mink-lasso says so and exits with status
+1; it exits the same way, naming Masso Link as the likely cause, if the UDP port
+range is already in use. A bad flag, or `-headless` omitted on a platform with
+no GUI, exits with status 2.
 
 ## Development
 
@@ -160,9 +174,9 @@ the app headless against it; drop a file into `/tmp/w` and watch it move to
 tool table, uploads (`MLTEST1.NC` and `MLTEST2.NC`, then `MLTEST1.NC` again to
 confirm overwriting), and an end-to-end test that starts the built exe headless
 and drops `MLTEST3.NC` into a watched folder. The suite skips itself unless
-`MINK_LASSO_SERIAL` is set, and skips the upload tests while the machine is
-running unless `MINK_LASSO_ALLOW_RUNNING=1`. Delete the `MLTEST*.NC` files from
-the USB drive whenever convenient.
+`MINK_LASSO_SERIAL` is set, and skips the upload and end-to-end tests while the
+machine is running unless `MINK_LASSO_ALLOW_RUNNING=1`. Delete the `MLTEST*.NC`
+files from the USB drive whenever convenient.
 
 The `integration` GitHub Actions workflow runs the suite on a self-hosted runner
 on the shop PC. Start it with
