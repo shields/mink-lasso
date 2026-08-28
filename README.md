@@ -203,7 +203,7 @@ On the shop PC, as administrator:
 
    ```text
    mkdir C:\actions-runner && cd C:\actions-runner
-   curl -o actions-runner-win-x64.zip -L https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-win-x64-2.336.0.zip
+   curl -o actions-runner-win-x64.zip -L https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-win-x64-2.337.0.zip
    tar xf actions-runner-win-x64.zip
    .\config.cmd --url https://github.com/shields/mink-lasso --token <token> --name masso-shop-pc --labels masso --unattended --runasservice
    ```
