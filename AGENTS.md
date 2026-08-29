@@ -83,9 +83,10 @@ There is nothing to bump.
 
 `make sim` runs a fake controller (`internal/masso/sim`) for development on any
 OS; `make run RUN_ARGS=...` runs the app headless against it. `make integration`
-runs `internal/integration` (build tag `integration`) against a real controller
-from the self-hosted Windows runner; every test skips unless `MINK_LASSO_SERIAL`
-is set, and the upload/E2E tests additionally skip while the machine is running
+runs `internal/integration` (build tag `integration`) against a real controller,
+by hand from a Windows PC on its LAN (there is no CI job: the controller is
+powered down between sessions); every test skips unless `MINK_LASSO_SERIAL` is
+set, and the upload/E2E tests additionally skip while the machine is running
 unless `MINK_LASSO_ALLOW_RUNNING=1`. The E2E test needs the built exe, found via
 `MINK_LASSO_EXE` (set by the `integration` Makefile target); it skips itself if
 unset. Test files are named `MLTEST*.NC` so they are easy to find and delete on

@@ -178,39 +178,20 @@ and drops `MLTEST3.NC` into a watched folder. The suite skips itself unless
 machine is running unless `MINK_LASSO_ALLOW_RUNNING=1`. Delete the `MLTEST*.NC`
 files from the USB drive whenever convenient.
 
-The `integration` GitHub Actions workflow runs the suite on a self-hosted runner
-on the shop PC. Start it with
+Run it by hand from Git Bash on a Windows PC on the controller's LAN, with Go
+and GNU make installed (`choco install make` or
+`winget install ezwinports.make`), the controller powered up with a USB drive in
+it, Masso Link closed, and nothing else talking to the controller:
 
 ```text
-gh workflow run integration.yml -f serial=G3-12345
+MINK_LASSO_SERIAL=G3-12345 make integration
 ```
 
-(or set the `MASSO_SERIAL` repository variable and omit `-f`). Requirements: a
-USB drive in the controller, Masso Link closed, and nothing else talking to the
-controller.
-
-#### Setting up the runner
-
-On the shop PC, as administrator:
-
-1. Install [Git for Windows](https://git-scm.com/download/win) and GNU make
-   (`choco install make` or `winget install ezwinports.make`); the runner uses
-   Git Bash for its shell.
-2. Add the firewall rule from [Firewall](#firewall) (the runner service has no
-   desktop, so it cannot answer the firewall prompt).
-3. Register the runner (the repository must stay private; GitHub advises against
-   self-hosted runners on public repositories):
-
-   ```text
-   mkdir C:\actions-runner && cd C:\actions-runner
-   curl -o actions-runner-win-x64.zip -L https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-win-x64-2.337.0.zip
-   tar xf actions-runner-win-x64.zip
-   .\config.cmd --url https://github.com/shields/mink-lasso --token <token> --name masso-shop-pc --labels masso --unattended --runasservice
-   ```
-
-   Get `<token>` with
-   `gh api -X POST repos/shields/mink-lasso/actions/runners/registration-token --jq .token`.
-   The `masso` label is what the workflow selects on.
+`make integration` builds the exe first and hands it to the end-to-end test
+through `MINK_LASSO_EXE`. Add the firewall rule from [Firewall](#firewall) once
+beforehand: `go test` builds a fresh test binary on every run, so Windows
+Firewall would otherwise prompt each time, and a prompt left unanswered for a
+second is a failed discovery.
 
 ### Manual checks
 
