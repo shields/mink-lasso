@@ -15,7 +15,7 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"log/slog"
 	"os"
@@ -272,6 +272,34 @@ func TestLoad_unknownField(t *testing.T) {
 	}
 }
 
+func TestLoad_rejectsInvalidV2Input(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "case-mismatched field", data: []byte(`{"Serial":"G3-1"}`)},
+		{name: "duplicate field", data: []byte(`{"serial":"G3-1","serial":"G3-2"}`)},
+		{name: "invalid UTF-8", data: []byte("{\"watchDir\":\"\xff\"}")},
+		{name: "trailing value", data: []byte(`{} {}`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, tt.data, 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load() = nil error, want an error")
+			}
+		})
+	}
+}
+
 func TestLoad_invalidAfterValidate(t *testing.T) {
 	t.Parallel()
 
@@ -353,6 +381,31 @@ func TestSave_roundTrip(t *testing.T) {
 	}
 }
 
+func TestSave_nilExtensionsAsEmptyArray(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := Default()
+	c.Extensions = nil
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var saved struct {
+		Extensions []string `json:"extensions"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("Unmarshal saved config: %v", err)
+	}
+	if saved.Extensions == nil || len(saved.Extensions) != 0 {
+		t.Errorf("saved extensions = %#v, want a non-nil empty slice", saved.Extensions)
+	}
+}
+
 func TestSave_mkdirAllError(t *testing.T) {
 	t.Parallel()
 
@@ -370,17 +423,14 @@ func TestSave_mkdirAllError(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // mutates the package-level marshalIndent hook; must not run concurrently with other Save tests
 func TestSave_marshalError(t *testing.T) {
-	errMarshal := errors.New("boom")
-	original := marshalIndent
-	marshalIndent = func(any, string, string) ([]byte, error) { return nil, errMarshal }
-	t.Cleanup(func() { marshalIndent = original })
+	t.Parallel()
 
+	c := Default()
+	c.WatchDir = "\xff"
 	path := filepath.Join(t.TempDir(), "config.json")
-	err := Default().Save(path)
-	if !errors.Is(err, errMarshal) {
-		t.Fatalf("Save() error = %v, want it to wrap %v", err, errMarshal)
+	if err := c.Save(path); err == nil {
+		t.Fatal("Save(invalid UTF-8) = nil error, want an error")
 	}
 }
 

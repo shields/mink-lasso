@@ -15,13 +15,13 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"testing"
 	"time"
 )
 
-func TestDuration_MarshalJSON(t *testing.T) {
+func TestDuration_MarshalJSONTo(t *testing.T) {
 	t.Parallel()
 
 	data, err := json.Marshal(Duration(3 * time.Second))
@@ -33,7 +33,7 @@ func TestDuration_MarshalJSON(t *testing.T) {
 	}
 }
 
-func TestDuration_UnmarshalJSON(t *testing.T) {
+func TestDuration_UnmarshalJSONFrom(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {

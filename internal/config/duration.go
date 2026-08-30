@@ -15,7 +15,8 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"time"
 )
@@ -23,20 +24,20 @@ import (
 // Duration is a time.Duration that marshals to and from JSON as a Go
 // duration string (e.g. "3s") rather than an integer count of nanoseconds,
 // so the config file stays human-readable and human-editable.
-type Duration time.Duration
+type Duration time.Duration //nolint:recvcheck // MarshalJSONTo reads a value; UnmarshalJSONFrom must mutate a pointer.
 
-// MarshalJSON implements json.Marshaler.
-func (d Duration) MarshalJSON() ([]byte, error) {
+// MarshalJSONTo implements json.MarshalerTo.
+func (d Duration) MarshalJSONTo(enc *jsontext.Encoder) error {
 	// Marshaling a string cannot fail, so there is no error path to test
 	// here: no invalid UTF-8 or unsupported-type case exists for a string.
-	return json.Marshal(time.Duration(d).String())
+	return json.MarshalEncode(enc, time.Duration(d).String())
 }
 
-// UnmarshalJSON implements json.Unmarshaler. It rejects strings that
+// UnmarshalJSONFrom implements json.UnmarshalerFrom. It rejects strings that
 // time.ParseDuration cannot parse and durations that parse as negative.
-func (d *Duration) UnmarshalJSON(data []byte) error {
+func (d *Duration) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
+	if err := json.UnmarshalDecode(dec, &s); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidDuration, err)
 	}
 

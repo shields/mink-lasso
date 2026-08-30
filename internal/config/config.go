@@ -16,8 +16,8 @@
 package config
 
 import (
-	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,12 +40,6 @@ var logLevels = map[string]slog.Level{
 	"warn":  slog.LevelWarn,
 	"error": slog.LevelError,
 }
-
-// marshalIndent is a package variable so tests can force the otherwise
-// unreachable error path in Save: every Config field is a string, int,
-// bool, []string, or Duration (which itself cannot fail to marshal), so
-// json.MarshalIndent never actually errors on a real Config.
-var marshalIndent = json.MarshalIndent
 
 // writeFile is a package variable so tests can force Save's write-failure
 // path deterministically on every OS: unlike a read-only directory (which
@@ -142,9 +136,7 @@ func Load(path string) (Config, error) {
 	}
 
 	cfg := Default()
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
+	if err := json.Unmarshal(data, &cfg, json.RejectUnknownMembers(true)); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	cfg = cfg.Normalize()
@@ -165,7 +157,7 @@ func (c Config) Save(path string) error {
 		return fmt.Errorf("config: create %s: %w", dir, err)
 	}
 
-	data, err := marshalIndent(c, "", "  ")
+	data, err := json.Marshal(c, jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Errorf("config: marshal: %w", err)
 	}
