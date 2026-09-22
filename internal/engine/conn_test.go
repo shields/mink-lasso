@@ -17,12 +17,12 @@ package engine
 // This file exercises the connection loop (conn.go) end-to-end against a
 // real internal/masso/sim controller over loopback UDP, using a real
 // *masso.Client wrapped through clientAdapter. Real broadcast discovery
-// cannot reach a loopback simulator on every OS (see
-// masso.addDiscoveryTarget's doc comment) and that test-only hook is not
-// exported outside package masso, so the broadcast-path tests here wrap the
-// real client in discoverStubClient to supply a canned Discover result
-// while every other method — Connect, Run, Status, Tools — still talks to
-// the real sim over the real socket.
+// cannot reach a loopback simulator on every OS, and would re-target any
+// real controller on the LAN, so every client here discovers only an
+// unanswered loopback port (see unansweredDiscoveryTargets); the
+// broadcast-path tests wrap the real client in discoverStubClient to supply
+// a canned Discover result while every other method — Connect, Run, Status,
+// Tools — still talks to the real sim over the real socket.
 
 import (
 	"context"
@@ -98,6 +98,7 @@ func connTestOptions(serial uint16) Options {
 			ReplyTimeout:      20 * time.Millisecond,
 			KeepaliveInterval: 20 * time.Millisecond,
 			LostAfter:         300 * time.Millisecond,
+			DiscoveryTargets:  unansweredDiscoveryTargets(),
 		},
 		UnicastFirst:      300 * time.Millisecond,
 		BroadcastInterval: 40 * time.Millisecond,

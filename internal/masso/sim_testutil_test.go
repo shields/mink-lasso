@@ -16,9 +16,8 @@
 // internal/masso/sim imports internal/masso, so a same-package (package
 // masso) test file cannot also import sim without an import cycle; these
 // tests live in this separate, external test package instead, using only
-// masso's exported API (plus the one test-only hook exported for this
-// purpose in export_test.go). The remaining Client tests, which need
-// unexported access but not sim, stay in package masso.
+// masso's exported API. The remaining Client tests, which need unexported
+// access but not sim, stay in package masso.
 package masso_test
 
 import (
@@ -55,11 +54,23 @@ func freePort(*testing.T) int {
 }
 
 // newTestClient builds a Client on its own private port using cl for all
-// timing, and registers its Close for test cleanup.
+// timing, and registers its Close for test cleanup. Its Discover sends only
+// to a private loopback port nothing listens on.
 func newTestClient(t *testing.T, cl clock.Clock) *masso.Client {
 	t.Helper()
+	return newDiscoveryTestClient(t, cl, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: freePort(t)})
+}
+
+// newDiscoveryTestClient is newTestClient with Discover sending only to
+// discoveryTarget — never to the real network, where every controller that
+// hears a discovery request re-targets its replies to the test.
+func newDiscoveryTestClient(t *testing.T, cl clock.Clock, discoveryTarget *net.UDPAddr) *masso.Client {
+	t.Helper()
 	port := freePort(t)
-	c, err := masso.NewClient(masso.Options{Clock: cl, PortMin: port, PortMax: port})
+	c, err := masso.NewClient(masso.Options{
+		Clock: cl, PortMin: port, PortMax: port,
+		DiscoveryTargets: []*net.UDPAddr{discoveryTarget},
+	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

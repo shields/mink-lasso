@@ -106,6 +106,14 @@ type Options struct {
 	// (*net.Interface).Addrs.
 	InterfaceAddrs func(*net.Interface) ([]net.Addr, error)
 
+	// DiscoveryTargets, if non-empty, are the only destinations Discover
+	// sends to, replacing the limited and directed broadcasts entirely. Nil
+	// means broadcast. Tests set it so that Discover can reach a loopback
+	// simulator (a loopback interface does not support IP broadcast on
+	// every OS) without also broadcasting on the real network, where every
+	// controller that hears the request re-targets its replies to the test.
+	DiscoveryTargets []*net.UDPAddr
+
 	// KeepaliveInterval is how often Run sends a keepalive to the
 	// connected controller. Zero means one second.
 	KeepaliveInterval time.Duration
@@ -198,6 +206,7 @@ type Client struct {
 
 	interfacesFn     func() ([]net.Interface, error)
 	interfaceAddrsFn func(*net.Interface) ([]net.Addr, error)
+	discoveryTargets []*net.UDPAddr
 
 	keepaliveInterval time.Duration
 	lostAfter         time.Duration
@@ -205,10 +214,9 @@ type Client struct {
 	retransmit        time.Duration
 	stallTimeout      time.Duration
 
-	mu                    sync.Mutex
-	waiters               map[byte][]*waiter
-	remote                *net.UDPAddr
-	extraDiscoveryTargets []*net.UDPAddr
+	mu      sync.Mutex
+	waiters map[byte][]*waiter
+	remote  *net.UDPAddr
 
 	statusIn  chan Status // written by the reader goroutine only
 	statusOut chan Status // written by Run only
@@ -253,6 +261,7 @@ func NewClient(opts Options) (*Client, error) {
 		localPort:         uint16(boundPort & 0xFFFF), // boundPort is one of the ports we asked to bind, always in range
 		interfacesFn:      opts.Interfaces,
 		interfaceAddrsFn:  opts.InterfaceAddrs,
+		discoveryTargets:  slices.Clone(opts.DiscoveryTargets),
 		keepaliveInterval: opts.KeepaliveInterval,
 		lostAfter:         opts.LostAfter,
 		replyTimeout:      opts.ReplyTimeout,

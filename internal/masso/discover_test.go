@@ -36,9 +36,9 @@ func TestDiscoverEmptyWhenNothingAnswers(t *testing.T) {
 	ctx := t.Context()
 	fc := clock.NewFake(time.Unix(0, 0))
 	c := newTestClient(t, fc)
-	// No addDiscoveryTarget: the limited broadcast always sends
-	// successfully but nothing on this test machine will answer it, so
-	// this exercises "sent, nothing answered" rather than a send failure.
+	// newTestClient aims Discover at a loopback port nothing listens on:
+	// the send succeeds but nothing answers, so this exercises "sent,
+	// nothing answered" rather than a send failure.
 	resultCh := make(chan struct {
 		found []Found
 		err   error
@@ -76,11 +76,7 @@ func TestDiscoverIgnoresNonUDPSourceAddr(t *testing.T) {
 	ctx := t.Context()
 	identityPkt := Identity{Serial: 1}.Encode()
 
-	// Bound to 0.0.0.0, not 127.0.0.1: a loopback-bound socket cannot send
-	// to a broadcast address at all (EADDRNOTAVAIL on macOS), which would
-	// make sendDiscoveryBroadcast fail before Discover ever creates its
-	// collection timer.
-	realConn, err := net.ListenPacket("udp", "0.0.0.0:0")
+	realConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ListenPacket: %v", err)
 	}
@@ -102,8 +98,8 @@ func TestDiscoverIgnoresNonUDPSourceAddr(t *testing.T) {
 	port := freePort(t)
 	c, err := NewClient(Options{
 		Clock: clock.Real{}, PortMin: port, PortMax: port,
-		ListenPacket: func(string, string) (net.PacketConn, error) { return fc, nil },
-		Interfaces:   func() ([]net.Interface, error) { return nil, nil }, // avoid this machine's real interfaces
+		ListenPacket:     func(string, string) (net.PacketConn, error) { return fc, nil },
+		DiscoveryTargets: unansweredTargets(t),
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -147,11 +143,23 @@ func TestDiscoverIgnoresNonUDPSourceAddr(t *testing.T) {
 
 func TestSendDiscoveryBroadcastLogsInterfaceEnumFailure(t *testing.T) {
 	t.Parallel()
+	realConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	// Record the broadcast rather than sending it: a real one would reach,
+	// and re-target, any controller on this machine's network.
+	var sentTo []string
+	fc := &fakeConn{PacketConn: realConn, writeTo: func(p []byte, addr net.Addr) (int, error) {
+		sentTo = append(sentTo, addr.String())
+		return len(p), nil
+	}}
 	port := freePort(t)
 	enumErr := errors.New("enum boom")
 	c, err := NewClient(Options{
 		PortMin: port, PortMax: port,
-		Interfaces: func() ([]net.Interface, error) { return nil, enumErr },
+		ListenPacket: func(string, string) (net.PacketConn, error) { return fc, nil },
+		Interfaces:   func() ([]net.Interface, error) { return nil, enumErr },
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -163,6 +171,10 @@ func TestSendDiscoveryBroadcastLogsInterfaceEnumFailure(t *testing.T) {
 	// needs to exercise the log line taken along the way.
 	if err := c.sendDiscoveryBroadcast(); err != nil {
 		t.Fatalf("sendDiscoveryBroadcast: %v", err)
+	}
+	limited := (&net.UDPAddr{IP: net.IPv4bcast, Port: ControllerPort}).String()
+	if len(sentTo) != 1 || sentTo[0] != limited {
+		t.Errorf("sent to %v, want just %s", sentTo, limited)
 	}
 }
 
@@ -246,29 +258,40 @@ func TestDiscoveryDestinationsIncludesDirectedBroadcast(t *testing.T) {
 	}
 }
 
-func TestDiscoveryDestinationsDeduplicatesExtraTargets(t *testing.T) {
+func TestDiscoveryDestinationsTargetsReplaceBroadcast(t *testing.T) {
 	t.Parallel()
+	targets := []*net.UDPAddr{
+		{IP: net.ParseIP("10.0.0.5"), Port: ControllerPort},
+		{IP: net.ParseIP("10.0.0.6"), Port: 1234},
+	}
 	port := freePort(t)
 	c, err := NewClient(Options{
 		PortMin: port, PortMax: port,
-		Interfaces: func() ([]net.Interface, error) { return nil, nil },
+		Interfaces: func() ([]net.Interface, error) {
+			t.Error("Interfaces called; DiscoveryTargets must replace broadcast entirely")
+			return nil, nil
+		},
+		DiscoveryTargets: targets,
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-
-	limited := &net.UDPAddr{IP: net.IPv4bcast, Port: ControllerPort}
-	c.addDiscoveryTarget(limited) // duplicate of the always-present limited broadcast
-	c.addDiscoveryTarget(&net.UDPAddr{IP: net.ParseIP("10.0.0.5"), Port: ControllerPort})
-	c.addDiscoveryTarget(&net.UDPAddr{IP: net.ParseIP("10.0.0.5"), Port: ControllerPort}) // duplicate
+	// NewClient must have copied the slice, not kept the caller's.
+	targets[0] = &net.UDPAddr{IP: net.IPv4bcast, Port: ControllerPort}
 
 	dests, err := c.discoveryDestinations()
 	if err != nil {
 		t.Fatalf("discoveryDestinations: %v", err)
 	}
-	if len(dests) != 2 {
-		t.Fatalf("dests = %v, want 2 entries after deduplication", dests)
+	want := []string{"10.0.0.5:65535", "10.0.0.6:1234"}
+	if len(dests) != len(want) {
+		t.Fatalf("dests = %v, want %v", dests, want)
+	}
+	for i, d := range dests {
+		if d.String() != want[i] {
+			t.Errorf("dests[%d] = %v, want %s", i, d, want[i])
+		}
 	}
 }
 

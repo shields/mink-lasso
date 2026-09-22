@@ -16,8 +16,7 @@
 // The sim-dependent tests live in an external package masso_test, because
 // internal/masso/sim imports internal/masso: a same-package test file
 // cannot also import sim without creating an import cycle. Its parallel
-// helpers are duplicated in sim_testutil_test.go for that package. See
-// export_test.go for the one internal made available to it.
+// helpers are duplicated in sim_testutil_test.go for that package.
 
 package masso
 
@@ -54,12 +53,21 @@ func freePort(*testing.T) int {
 	return int(nextTestPort.Add(1))
 }
 
+// unansweredTargets returns an Options.DiscoveryTargets naming a private
+// loopback port nothing listens on, so a Discover call sends a real packet
+// that nothing answers instead of broadcasting on the real network.
+func unansweredTargets(t *testing.T) []*net.UDPAddr {
+	t.Helper()
+	return []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freePort(t)}}
+}
+
 // newTestClient builds a Client on its own private port (via freePort) using
-// cl for all timing, and registers its Close for test cleanup.
+// cl for all timing, and registers its Close for test cleanup. Its Discover
+// sends only to unansweredTargets.
 func newTestClient(t *testing.T, cl clock.Clock) *Client {
 	t.Helper()
 	port := freePort(t)
-	c, err := NewClient(Options{Clock: cl, PortMin: port, PortMax: port})
+	c, err := NewClient(Options{Clock: cl, PortMin: port, PortMax: port, DiscoveryTargets: unansweredTargets(t)})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

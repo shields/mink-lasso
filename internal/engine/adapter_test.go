@@ -53,6 +53,15 @@ func freeAdapterPort() int {
 	return int(nextAdapterTestPort.Add(adapterTestPortBlock))
 }
 
+// unansweredDiscoveryTargets returns a masso.Options.DiscoveryTargets naming
+// a private loopback port nothing listens on. Every real *masso.Client in
+// this package's tests gets one, so its Discover sends a packet nothing
+// answers rather than broadcasting on the real network, where every
+// controller that hears the request would re-target its replies to the test.
+func unansweredDiscoveryTargets() []*net.UDPAddr {
+	return []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freeAdapterPort()}}
+}
+
 // newAdapterTestClient binds a real *masso.Client on its own private port
 // with short reply timeouts, so an unanswered request fails fast.
 func newAdapterTestClient(t *testing.T) *masso.Client {
@@ -64,9 +73,10 @@ func newAdapterTestClient(t *testing.T) *masso.Client {
 		// (this range sits inside the OS ephemeral port range); the full
 		// ten-port block reserved above gives masso.NewClient's own
 		// retry loop room to move past that, mirroring newConnTestNewClient.
-		PortMin:      port,
-		PortMax:      port + adapterTestPortBlock - 1,
-		ReplyTimeout: time.Millisecond,
+		PortMin:          port,
+		PortMax:          port + adapterTestPortBlock - 1,
+		ReplyTimeout:     time.Millisecond,
+		DiscoveryTargets: unansweredDiscoveryTargets(),
 	})
 	if err != nil {
 		t.Fatalf("masso.NewClient: %v", err)
@@ -106,7 +116,7 @@ func TestClientAdapterUnconnected(t *testing.T) {
 }
 
 // TestClientAdapterDiscovery drives the two network-sending adapter
-// methods, Discover and Connect, against a loopback address with no
+// methods, Discover and Connect, against loopback addresses with no
 // listener: both fail fast because of the short timeouts given.
 func TestClientAdapterDiscovery(t *testing.T) {
 	t.Parallel()

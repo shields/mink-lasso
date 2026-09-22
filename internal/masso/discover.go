@@ -32,7 +32,8 @@ type Found struct {
 
 // Discover broadcasts a discovery request — to the limited broadcast address
 // 255.255.255.255:65535 and to the directed broadcast of every up,
-// non-loopback IPv4 interface address — and collects Identity replies,
+// non-loopback IPv4 interface address, or only to Options.DiscoveryTargets
+// if any were given — and collects Identity replies,
 // deduplicated by source address, until timeout elapses. A nil error with a
 // possibly empty slice means the request was sent but timeout ran out; the
 // only error this returns for the send itself is ErrDiscoverySend, when no
@@ -93,24 +94,9 @@ func (c *Client) DiscoverAt(ctx context.Context, addr *net.UDPAddr, timeout time
 	return mustType[Identity](reply), nil
 }
 
-// addDiscoveryTarget is a test-only hook: it adds addr to the destinations
-// Discover sends to, alongside the broadcast addresses it computes itself.
-// It exists because a loopback interface does not support IP broadcast on
-// every OS — confirmed on macOS, where lo0 lacks IFF_BROADCAST, so nothing
-// sent to 255.255.255.255 or a directed loopback broadcast such as
-// 127.255.255.255 is ever delivered to a socket bound there — leaving tests
-// no way to exercise Discover's real broadcast-and-collect path against a
-// simulator on 127.0.0.1 without it.
-func (c *Client) addDiscoveryTarget(addr *net.UDPAddr) {
-	c.mu.Lock()
-	c.extraDiscoveryTargets = append(c.extraDiscoveryTargets, addr)
-	c.mu.Unlock()
-}
-
 // sendDiscoveryBroadcast sends a discovery request to every destination
-// discoveryDestinations computes — which always includes at least the
-// limited broadcast address, so there is always at least one attempt to
-// report on. It returns ErrDiscoverySend only if not one of them accepted
+// discoveryDestinations computes — which is never empty, so there is always
+// at least one attempt to report on. It returns ErrDiscoverySend only if not one of them accepted
 // the packet; a partial failure (some destinations sent, others errored or
 // were never enumerated) is not an error.
 func (c *Client) sendDiscoveryBroadcast() error {
@@ -136,14 +122,18 @@ func (c *Client) sendDiscoveryBroadcast() error {
 	return fmt.Errorf("%w: %w", ErrDiscoverySend, sendErr)
 }
 
-// discoveryDestinations returns the limited broadcast address, the directed
+// discoveryDestinations returns Options.DiscoveryTargets if any were given.
+// Otherwise it returns the limited broadcast address and the directed
 // broadcast of every up, non-loopback interface address Options.Interfaces
-// and Options.InterfaceAddrs report, and any addDiscoveryTarget addresses,
-// deduplicated. A non-nil error means Options.Interfaces itself failed;
-// discoveryDestinations still returns the limited-broadcast (and any extra
-// test) destinations in that case, since the caller only treats the overall
+// and Options.InterfaceAddrs report, deduplicated. A non-nil error means
+// Options.Interfaces itself failed; discoveryDestinations still returns the
+// limited broadcast in that case, since the caller only treats the overall
 // send as failed if literally nothing got through.
 func (c *Client) discoveryDestinations() ([]*net.UDPAddr, error) {
+	if len(c.discoveryTargets) > 0 {
+		return slices.Clone(c.discoveryTargets), nil
+	}
+
 	limited := &net.UDPAddr{IP: net.IPv4bcast, Port: ControllerPort}
 	dests := []*net.UDPAddr{limited}
 	seen := map[string]bool{limited.String(): true}
@@ -153,13 +143,6 @@ func (c *Client) discoveryDestinations() ([]*net.UDPAddr, error) {
 			seen[key] = true
 			dests = append(dests, d)
 		}
-	}
-
-	c.mu.Lock()
-	extra := slices.Clone(c.extraDiscoveryTargets)
-	c.mu.Unlock()
-	for _, d := range extra {
-		addDest(d)
 	}
 
 	ifaces, err := c.interfacesFn()

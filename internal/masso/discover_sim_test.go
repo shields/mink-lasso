@@ -32,14 +32,13 @@ func TestDiscoverFindsSimulatorViaExtraTarget(t *testing.T) {
 
 	// A loopback interface has no IFF_BROADCAST on every OS (confirmed on
 	// macOS), so nothing sent to 255.255.255.255 or a directed loopback
-	// broadcast is ever delivered to a socket bound there.
-	// AddDiscoveryTargetForTest is the test-only hook this package adds
-	// for exactly that reason (see export_test.go). This test uses a real
+	// broadcast is ever delivered to a socket bound there; and a real
+	// broadcast would also reach, and re-target, any controller on the LAN.
+	// So Discover is aimed at the simulator alone. This test uses a real
 	// (not fake) clock: it must let a genuine asynchronous reply be
 	// collected within Discover's real collection window, and advancing a
 	// fake clock for that window would race the reply's delivery.
-	c := newTestClient(t, clock.Real{})
-	c.AddDiscoveryTargetForTest(s.Addr())
+	c := newDiscoveryTestClient(t, clock.Real{}, s.Addr())
 
 	found, err := c.Discover(ctx, 500*time.Millisecond)
 	if err != nil {
@@ -61,8 +60,7 @@ func TestDiscoverDeduplicatesBySourceAddress(t *testing.T) {
 	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 111})
 	s.SetDuplicateReplies(true)
-	c := newTestClient(t, clock.Real{})
-	c.AddDiscoveryTargetForTest(s.Addr())
+	c := newDiscoveryTestClient(t, clock.Real{}, s.Addr())
 
 	found, err := c.Discover(ctx, 500*time.Millisecond)
 	if err != nil {
@@ -77,8 +75,7 @@ func TestDiscoverCtxCancelReturnsError(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	s := newSim(t, sim.Options{Serial: 1})
-	c := newTestClient(t, clock.Real{})
-	c.AddDiscoveryTargetForTest(s.Addr())
+	c := newDiscoveryTestClient(t, clock.Real{}, s.Addr())
 
 	resultCh := make(chan struct {
 		found []masso.Found
