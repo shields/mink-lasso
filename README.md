@@ -16,6 +16,8 @@ limitations under the License.
 
 # mink-lasso
 
+![Mink encircled by a gold lasso](build/icon.png)
+
 A Windows app that sends G-code to a Masso G3 CNC controller automatically. It
 does what Masso Link does—shows the machine's status and tool table and uploads
 files to the controller's USB drive over the network—but instead of waiting for
