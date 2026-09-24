@@ -434,10 +434,11 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// expectAborts waits for s to have received exactly want upload-abort
-// notifications.
-func expectAborts(t *testing.T, s *sim.Controller, want int) {
+// expectAborts waits for s to have received exactly three upload-abort
+// notifications (docs/protocol.md §5.5).
+func expectAborts(t *testing.T, s *sim.Controller) {
 	t.Helper()
+	const want = 3
 	eventually(t, fmt.Sprintf("%d upload-abort notifications", want), func() bool { return s.Aborts() >= want })
 	if got := s.Aborts(); got != want {
 		t.Fatalf("Aborts() = %d, want %d", got, want)
@@ -494,9 +495,9 @@ func TestUploadLostChunkRecovered(t *testing.T) {
 			}
 
 			// Chunk 0 went unacknowledged; the retransmit timeout starts
-			// at twice the 60ms seed.
+			// at twice the 60ms seed, and fires strictly after it.
 			fc.BlockUntil(1)
-			fc.Advance(120 * time.Millisecond)
+			fc.Advance(120*time.Millisecond + time.Nanosecond)
 
 			if second := waitFor(t, progressCh); second != (progressEvent{10, 10}) {
 				t.Fatalf("second progress = %+v", second)
@@ -578,7 +579,7 @@ func TestUploadSilentAfterChunkErrNoResponse(t *testing.T) {
 	if err := waitFor(t, errCh); !errors.Is(err, masso.ErrNoResponse) {
 		t.Fatalf("Upload = %v, want ErrNoResponse", err)
 	}
-	expectAborts(t, s, 3)
+	expectAborts(t, s)
 	eventually(t, "chunk 1 to reach the simulator", func() bool { return s.ChunkRequests() == 2 })
 	if _, ok := s.File("SILENT.NC"); ok {
 		t.Fatal("file stored despite the stall")
@@ -599,16 +600,21 @@ func TestUploadStartResults(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := t.Context()
 			s := newSim(t, sim.Options{Serial: 1})
 			s.SetStartResult(tc.result)
-			c, _ := newFakeClockClient(t, s, masso.Options{})
-			err := c.Upload(t.Context(), "", "ST.NC", bytes.NewReader(testData(1)), 1, nil)
+			c := newTestClient(t, clock.Real{})
+			if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			err := c.Upload(ctx, "", "ST.NC", bytes.NewReader(testData(1)), 1, nil)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
 			}
 			if _, ok := s.File("ST.NC"); ok {
 				t.Fatal("file stored despite the refused start")
 			}
+			expectAborts(t, s)
 		})
 	}
 }
@@ -638,7 +644,7 @@ func TestUploadChunkResults(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
 			}
-			expectAborts(t, s, 3)
+			expectAborts(t, s)
 		})
 	}
 }
@@ -656,7 +662,7 @@ func TestUploadReaderAtError(t *testing.T) {
 	if !errors.Is(err, masso.ErrRead) {
 		t.Fatalf("Upload = %v, want ErrRead", err)
 	}
-	expectAborts(t, s, 3)
+	expectAborts(t, s)
 }
 
 func TestUploadCtxAlreadyCanceled(t *testing.T) {
