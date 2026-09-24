@@ -150,16 +150,22 @@ func (s *scheduler) wait(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// setTerminal records it's final state for this send attempt and emits it.
+// setTerminal records its final state for this send attempt and emits it,
+// unless a folder switch has already orphaned and superseded it (see
+// supersededLocked), in which case the name now belongs to the replacement
+// and this stale outcome stays unreported.
 func (s *scheduler) setTerminal(it *item, state TransferState, msg string) {
 	s.mu.Lock()
 	it.state = state
 	it.message = msg
 	name := it.name
+	skip := s.supersededLocked(it)
 	ev := s.event(it)
 	s.mu.Unlock()
 	if state == Sent {
 		s.e.opts.Logger.Info("engine: file sent", "name", name)
 	}
-	s.e.dispatcher.emit(ev)
+	if !skip {
+		s.e.dispatcher.emit(ev)
+	}
 }

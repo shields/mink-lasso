@@ -732,12 +732,21 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 	}
 }
 
+// supersededLocked reports whether it is an orphaned item that itemLocked
+// has already replaced in s.items under its own name: that row now belongs
+// to the replacement, so an event in it.name would overwrite the
+// replacement's live state with this item's stale one. Callers must hold
+// s.mu.
+func (s *scheduler) supersededLocked(it *item) bool {
+	return it.orphaned && s.items[it.name] != it
+}
+
 // dropOrphanLocked removes an orphaned item from the queue through
 // dropLocked, unless itemLocked has already replaced it there: the row then
 // belongs to the replacement, so no Dropped event is reported for it.
 // Callers must hold s.mu.
 func (s *scheduler) dropOrphanLocked(it *item) (TransferEvent, bool) {
-	if s.items[it.name] != it {
+	if s.supersededLocked(it) {
 		return TransferEvent{}, false
 	}
 	return s.dropLocked(it, DroppedWatchFolderChanged)
@@ -745,7 +754,10 @@ func (s *scheduler) dropOrphanLocked(it *item) (TransferEvent, bool) {
 
 // recordFailure applies the backoff schedule (or disables auto-retry for
 // ErrCanceled by simply never setting a nextAttempt) and emits Failed with
-// msg, which the caller has already resolved via failureMessage.
+// msg, which the caller has already resolved via failureMessage — unless a
+// folder switch has already orphaned and superseded it, in which case the
+// name now belongs to the replacement and this stale outcome stays
+// unreported (see supersededLocked).
 func (s *scheduler) recordFailure(it *item, uploadErr error, msg string) {
 	s.mu.Lock()
 	it.state = Failed
@@ -757,11 +769,14 @@ func (s *scheduler) recordFailure(it *item, uploadErr error, msg string) {
 		d := s.e.opts.Backoff[min(it.failCount-1, len(s.e.opts.Backoff)-1)]
 		it.nextAttempt = s.e.opts.Clock.Now().Add(d)
 	}
+	skip := s.supersededLocked(it)
 	ev := s.event(it)
 	s.mu.Unlock()
 
 	s.e.opts.Logger.Info("engine: upload failed", "name", it.name, "error", uploadErr)
-	s.e.dispatcher.emit(ev)
+	if !skip {
+		s.e.dispatcher.emit(ev)
+	}
 }
 
 // failureWording is failureMessage's result: base is the message as reported
