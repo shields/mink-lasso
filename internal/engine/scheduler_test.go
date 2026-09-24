@@ -461,6 +461,71 @@ func TestSchedulerSetWatchDirClearsQueue(t *testing.T) {
 	}
 }
 
+// DONE.NC is planted directly because nothing here can complete a send with
+// no controller configured.
+func TestSchedulerSetWatchDirEmitsDroppedForNonFinalItems(t *testing.T) {
+	t.Parallel()
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	opts := schedTestOptions(0, dir1)
+	opts.Config.Serial = ""
+	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+
+	e, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	events, _ := runEngine(t, e)
+	waitForEvent(t, events, isConnState(Unconfigured))
+
+	writeFile(t, dir1, "OLD.NC", []byte("old"))
+	waitForEvent(t, events, isTransferEvent("OLD.NC", Waiting))
+
+	e.scheduler.mu.Lock()
+	e.scheduler.items["DONE.NC"] = &item{name: "DONE.NC", state: Sent, message: "File sent"}
+	e.scheduler.mu.Unlock()
+
+	if err := e.SetWatchDir(dir2); err != nil {
+		t.Fatalf("SetWatchDir: %v", err)
+	}
+
+	// clearNonManual's own Dropped emissions race the new watch attempt's
+	// WatchState (two different goroutines), so this drains only until it
+	// finds OLD.NC's Dropped event, checking every event seen along the way
+	// for one that should never exist: anything at all naming the
+	// already-terminal DONE.NC.
+	deadline := time.After(connTestTimeout)
+collect:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("events channel closed before OLD.NC's Dropped event arrived")
+			}
+			if te, isTE := ev.(TransferEvent); isTE && te.Name == "DONE.NC" {
+				t.Errorf("unexpected event for already-terminal DONE.NC: %+v", te)
+			}
+			if te, isTE := ev.(TransferEvent); isTE && te.Name == "OLD.NC" && te.State == Dropped {
+				if te.Message != DroppedWatchFolderChanged {
+					t.Errorf("OLD.NC Dropped message = %q, want %q", te.Message, DroppedWatchFolderChanged)
+				}
+				break collect
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for OLD.NC's Dropped event")
+		}
+	}
+
+	e.scheduler.mu.Lock()
+	_, oldStill := e.scheduler.items["OLD.NC"]
+	_, doneStill := e.scheduler.items["DONE.NC"]
+	e.scheduler.mu.Unlock()
+	if oldStill || doneStill {
+		t.Error("items still in queue after SetWatchDir, want both cleared")
+	}
+}
+
 // TestSchedulerRejectedPassthrough confirms a watcher Rejected file is
 // reported as a Rejected transfer with the reason as its message.
 func TestSchedulerRejectedPassthrough(t *testing.T) {

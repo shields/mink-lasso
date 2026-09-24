@@ -155,9 +155,14 @@ func (m *Model) applyTransferEvent(e engine.TransferEvent) Changes {
 		changes.Balloon = &Balloon{Kind: BalloonInfo, Title: "File sent", Text: e.Name + " sent"}
 	case engine.Failed, engine.Rejected, engine.SentUnfiled:
 		changes.Balloon = &Balloon{Kind: BalloonError, Title: "Transfer problem", Text: e.Name + ": " + e.Message}
+	case engine.Dropped:
+		// The operator just changed the watch folder; anything else
+		// dropped is a file that will now never be sent.
+		if e.Message != engine.DroppedWatchFolderChanged {
+			changes.Balloon = &Balloon{Kind: BalloonError, Title: "Transfer problem", Text: e.Name + ": " + e.Message}
+		}
 	default:
-		// Pending, Waiting, and Sending are routine progress, not
-		// something the operator needs interrupted for.
+		// Pending, Waiting, and Sending are routine progress.
 	}
 	return changes
 }

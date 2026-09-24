@@ -106,7 +106,9 @@ type TransferState int
 
 // Transfer states. Pending and Waiting precede a send attempt; Sending is
 // in progress; Sent, Failed, Rejected, and SentUnfiled are terminal for
-// that attempt (Failed and SentUnfiled can still be retried).
+// that attempt (Failed and SentUnfiled can still be retried). Dropped is
+// terminal too, but marks an item the scheduler forgot outright rather than
+// one that ever reached a send attempt's own outcome.
 const (
 	Pending TransferState = iota
 	Waiting
@@ -115,6 +117,7 @@ const (
 	Failed
 	Rejected
 	SentUnfiled
+	Dropped
 )
 
 // String implements fmt.Stringer.
@@ -134,6 +137,8 @@ func (s TransferState) String() string {
 		return "Rejected"
 	case SentUnfiled:
 		return "SentUnfiled"
+	case Dropped:
+		return "Dropped"
 	default:
 		return "TransferState(" + strconv.Itoa(int(s)) + ")"
 	}
@@ -156,12 +161,17 @@ func (s TransferState) Retryable() bool {
 // (Failed and SentUnfiled can still be retried; see Retryable).
 func (s TransferState) Terminal() bool {
 	switch s {
-	case Sent, Failed, Rejected, SentUnfiled:
+	case Sent, Failed, Rejected, SentUnfiled, Dropped:
 		return true
 	default:
 		return false
 	}
 }
+
+// DroppedWatchFolderChanged is the Message of a Dropped TransferEvent for a
+// file left behind when the watch folder changed: the operator's own action
+// caused it, unlike a file that disappeared before it could be sent.
+const DroppedWatchFolderChanged = "Watch folder changed"
 
 // TransferEvent reports a change in one file's transfer state. Manual is
 // true only for a file queued through SendFile.

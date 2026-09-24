@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -244,7 +245,7 @@ func TestOpenForSendStatError(t *testing.T) {
 func TestPreflightFailedVanishedForgetsItem(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, nil)
-	it := &item{name: "A.NC", path: "/does/not/exist/A.NC", state: Pending}
+	it := &item{name: "A.NC", root: "/watch", path: "/does/not/exist/A.NC", state: Pending}
 	e.scheduler.items["A.NC"] = it
 	e.scheduler.preflightFailed(it, fs.ErrNotExist)
 
@@ -253,6 +254,86 @@ func TestPreflightFailedVanishedForgetsItem(t *testing.T) {
 	e.scheduler.mu.Unlock()
 	if ok {
 		t.Error("item still in queue after a vanished-file preflight failure, want forgotten")
+	}
+
+	evs := takeQueued(t, e)
+	if len(evs) != 1 || evs[0].State != Dropped || evs[0].Message != msgFileVanished {
+		t.Errorf("events = %+v, want one Dropped event with message %q", evs, msgFileVanished)
+	}
+}
+
+func TestPreflightFailedVanishedManualOutsideTreeGetsOwnWording(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	it := &item{name: "A.NC", path: "/does/not/exist/A.NC", state: Pending, manual: true}
+	e.scheduler.items["A.NC"] = it
+	e.scheduler.preflightFailed(it, fs.ErrNotExist)
+
+	evs := takeQueued(t, e)
+	if len(evs) != 1 || evs[0].State != Dropped || evs[0].Message != msgFileNoLongerExists {
+		t.Errorf("events = %+v, want one Dropped event with message %q", evs, msgFileNoLongerExists)
+	}
+}
+
+func TestPreflightFailedVanishedRefreshedRetriesInstead(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	it := &item{name: "A.NC", root: "/watch", path: "/does/not/exist/A.NC", state: Pending, resendAfter: true}
+	e.scheduler.items["A.NC"] = it
+	e.scheduler.preflightFailed(it, fs.ErrNotExist)
+
+	e.scheduler.mu.Lock()
+	state, resendAfter, nextAttempt := it.state, it.resendAfter, it.nextAttempt
+	_, ok := e.scheduler.items["A.NC"]
+	e.scheduler.mu.Unlock()
+	if !ok {
+		t.Error("item removed from queue despite a concurrent refresh, want kept for retry")
+	}
+	if state != Pending {
+		t.Errorf("state = %v, want Pending", state)
+	}
+	if resendAfter {
+		t.Error("resendAfter still set after preflight failure, want cleared")
+	}
+	if nextAttempt.IsZero() {
+		t.Error("nextAttempt not set, want Backoff[0] from now")
+	}
+
+	if evs := takeQueued(t, e); len(evs) != 1 || evs[0].State != Pending {
+		t.Errorf("events = %+v, want one Pending event", evs)
+	}
+}
+
+func TestPreflightFailedVanishedFinalItems(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		state       TransferState
+		wantDropped bool
+	}{
+		{Sent, false},
+		{Failed, true},
+		{Rejected, true},
+		{SentUnfiled, true},
+	} {
+		t.Run(tc.state.String(), func(t *testing.T) {
+			t.Parallel()
+			e := newUnitTestEngine(t, nil)
+			it := &item{name: "A.NC", root: "/watch", path: "/does/not/exist/A.NC", state: tc.state}
+			e.scheduler.items["A.NC"] = it
+			e.scheduler.preflightFailed(it, fs.ErrNotExist)
+
+			evs := takeQueued(t, e)
+			if tc.wantDropped {
+				if len(evs) != 1 || evs[0].State != Dropped || evs[0].Message != msgFileVanished {
+					t.Errorf("events = %+v, want one Dropped event with message %q", evs, msgFileVanished)
+				}
+			} else if len(evs) != 0 {
+				t.Errorf("events = %+v, want none: the row already shows the outcome", evs)
+			}
+			if _, ok := e.scheduler.items["A.NC"]; ok {
+				t.Error("item still queued, want forgotten")
+			}
+		})
 	}
 }
 
@@ -293,6 +374,35 @@ func TestPreflightFailedOrphanedDropsItem(t *testing.T) {
 	e.scheduler.mu.Unlock()
 	if ok {
 		t.Error("orphaned item still in queue after preflight failure, want dropped")
+	}
+
+	evs := takeQueued(t, e)
+	if len(evs) != 1 || evs[0].State != Dropped || evs[0].Message != DroppedWatchFolderChanged {
+		t.Errorf("events = %+v, want one Dropped event with message %q", evs, DroppedWatchFolderChanged)
+	}
+}
+
+func TestPreflightFailedOrphanedFinalItems(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		state       TransferState
+		wantDropped bool
+	}{
+		{Sent, false},
+		{Failed, true},
+	} {
+		t.Run(tc.state.String(), func(t *testing.T) {
+			t.Parallel()
+			e := newUnitTestEngine(t, nil)
+			it := &item{name: "A.NC", path: "/tmp/A.NC", state: tc.state, orphaned: true}
+			e.scheduler.items["A.NC"] = it
+			e.scheduler.preflightFailed(it, errors.New("busy"))
+
+			evs := takeQueued(t, e)
+			if tc.wantDropped != (len(evs) == 1 && evs[0].State == Dropped) || len(evs) > 1 {
+				t.Errorf("events = %+v, want a Dropped event: %v", evs, tc.wantDropped)
+			}
+		})
 	}
 }
 
@@ -599,6 +709,45 @@ func TestFailureMessage(t *testing.T) {
 	}
 }
 
+func TestClearNonManualEmitsDroppedForNonTerminalItems(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	e.scheduler.items["PENDING.NC"] = &item{name: "PENDING.NC", root: "/old", state: Pending}
+	e.scheduler.items["WAITING.NC"] = &item{name: "WAITING.NC", root: "/old", state: Waiting}
+	e.scheduler.items["FAILED.NC"] = &item{name: "FAILED.NC", root: "/old", state: Failed}
+	e.scheduler.items["SENT.NC"] = &item{name: "SENT.NC", root: "/old", state: Sent}
+	e.scheduler.items["MANUAL.NC"] = &item{name: "MANUAL.NC", state: Pending, manual: true}
+	e.scheduler.items["NEW.NC"] = &item{name: "NEW.NC", root: "/new", state: Pending}
+
+	e.scheduler.clearNonManual("/new")
+
+	e.scheduler.mu.Lock()
+	remaining := len(e.scheduler.items)
+	_, manualStill := e.scheduler.items["MANUAL.NC"]
+	_, newStill := e.scheduler.items["NEW.NC"]
+	e.scheduler.mu.Unlock()
+	if remaining != 2 || !manualStill || !newStill {
+		t.Errorf("items after clearNonManual = %v, want only MANUAL.NC and NEW.NC left", e.scheduler.items)
+	}
+
+	got := map[string]string{}
+	for _, ev := range takeQueued(t, e) {
+		if ev.State != Dropped {
+			t.Errorf("event %+v, want State Dropped", ev)
+			continue
+		}
+		got[ev.Name] = ev.Message
+	}
+	want := map[string]string{
+		"PENDING.NC": DroppedWatchFolderChanged,
+		"WAITING.NC": DroppedWatchFolderChanged,
+		"FAILED.NC":  DroppedWatchFolderChanged,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("Dropped events = %v, want %v", got, want)
+	}
+}
+
 // TestClearNonManualPreservesSendingItemThenDropsQueuedResend confirms
 // clearNonManual does not delete an in-flight Sending item out from under
 // the running send — the item stays in the queue, marked orphaned — but
@@ -620,7 +769,7 @@ func TestClearNonManualPreservesSendingItemThenDropsQueuedResend(t *testing.T) {
 		t.Fatal("resendAfter not set by ready() on a Sending item")
 	}
 
-	e.scheduler.clearNonManual()
+	e.scheduler.clearNonManual("")
 
 	e.scheduler.mu.Lock()
 	_, stillThere := e.scheduler.items["F.NC"]
@@ -659,7 +808,7 @@ func TestClearNonManualPreservesSendingItemThenDropsWithNoResend(t *testing.T) {
 	it := &item{name: "G.NC", path: "/does/not/matter", state: Sending, sending: true}
 	e.scheduler.items["G.NC"] = it
 
-	e.scheduler.clearNonManual()
+	e.scheduler.clearNonManual("")
 
 	e.scheduler.mu.Lock()
 	_, stillThere := e.scheduler.items["G.NC"]
@@ -680,6 +829,10 @@ func TestClearNonManualPreservesSendingItemThenDropsWithNoResend(t *testing.T) {
 	s.mu.Unlock()
 	if stillThere {
 		t.Error("orphaned item with no queued resend was not dropped once its send settled")
+	}
+	evs := takeQueued(t, e)
+	if len(evs) == 0 || evs[len(evs)-1].State != Dropped || evs[len(evs)-1].Message != DroppedWatchFolderChanged {
+		t.Errorf("events = %+v, want the Failed row replaced by Dropped (%q)", evs, DroppedWatchFolderChanged)
 	}
 }
 

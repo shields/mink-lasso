@@ -318,6 +318,7 @@ func TestApplyTransferEventBalloons(t *testing.T) {
 		{engine.Pending, 0, true, "", ""},
 		{engine.Waiting, 0, true, "", ""},
 		{engine.Sending, 0, true, "", ""},
+		{engine.Dropped, BalloonError, false, "Transfer problem", "A.NC: boom"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.state.String(), func(t *testing.T) {
@@ -343,6 +344,38 @@ func TestApplyTransferEventBalloons(t *testing.T) {
 				t.Errorf("Balloon.Text = %q, want %q", changes.Balloon.Text, tc.wantText)
 			}
 		})
+	}
+}
+
+func TestApplyTransferEventDroppedIsFinal(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	m := New(Options{MaxTransfers: 1})
+
+	changes := m.Apply(engine.TransferEvent{
+		Name: "A.NC", State: engine.Dropped, Message: engine.DroppedWatchFolderChanged, At: now,
+	})
+	if changes.Watch || changes.Tray || changes.Balloon != nil {
+		t.Errorf("changes = %+v, want Watch, Tray, and Balloon unset", changes)
+	}
+
+	rows := m.Transfers()
+	if len(rows) != 1 || rows[0].StateText != "Dropped" || rows[0].Message != engine.DroppedWatchFolderChanged {
+		t.Fatalf("rows = %+v, want one Dropped row", rows)
+	}
+	if got := m.Watch().PendingText; got != "Nothing waiting" {
+		t.Errorf("PendingText = %q, want %q (Dropped does not count as pending)", got, "Nothing waiting")
+	}
+	if m.RetryEnabled("A.NC") {
+		t.Error("RetryEnabled(Dropped) = true, want false")
+	}
+
+	// A second row pushes the table over MaxTransfers: the Dropped row,
+	// being terminal, is the one evicted rather than surviving forever.
+	m.Apply(engine.TransferEvent{Name: "B.NC", State: engine.Sending, At: now.Add(time.Second)})
+	rows = m.Transfers()
+	if len(rows) != 1 || rows[0].Name != "B.NC" {
+		t.Errorf("rows after eviction = %+v, want only B.NC (Dropped A.NC evicted)", rows)
 	}
 }
 

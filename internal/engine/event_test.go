@@ -49,6 +49,7 @@ func TestTransferStateString(t *testing.T) {
 		{Failed, "Failed"},
 		{Rejected, "Rejected"},
 		{SentUnfiled, "SentUnfiled"},
+		{Dropped, "Dropped"},
 		{TransferState(-1), "TransferState(-1)"},
 	}
 	for _, c := range cases {
@@ -71,6 +72,7 @@ func TestTransferStateRetryable(t *testing.T) {
 		{Failed, true},
 		{Rejected, true},
 		{SentUnfiled, true},
+		{Dropped, false},
 	}
 	for _, c := range cases {
 		if got := c.s.Retryable(); got != c.want {
@@ -92,6 +94,7 @@ func TestTransferStateTerminal(t *testing.T) {
 		{Failed, true},
 		{Rejected, true},
 		{SentUnfiled, true},
+		{Dropped, true},
 	}
 	for _, c := range cases {
 		if got := c.s.Terminal(); got != c.want {

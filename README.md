@@ -53,6 +53,8 @@ stateDiagram-v2
     Sending --> Failed: no response, no USB drive, write error, or canceled on the Masso
     Failed --> Pending: retried after 5 s, 10 s, 30 s, then every 60 s
     Failed --> Pending: file changes, or Retry clicked
+    Pending --> Dropped: file removed, or watch folder changed
+    Waiting --> Dropped: file removed, or watch folder changed
 ```
 
 A file is sent when it has **settled**: its size and modification time have not
