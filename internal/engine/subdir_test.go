@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -164,5 +165,74 @@ func TestSchedulerManualSendFileFromSubfolderGoesToRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("manual send moved the file: %v", err)
+	}
+}
+
+func TestSchedulerManualSendFileInWatchedSubfolderSharesRow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := newConnTestSim(t, 2104)
+	opts := schedTestOptions(2104, dir)
+	opts.Config.Address = s.Addr().String()
+	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+
+	e, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	events, _ := runEngine(t, e)
+	waitForEvent(t, events, isConnState(Connected))
+
+	const size = 4 << 20 // enough transfer time to call SendFile mid-flight
+	content := bytes.Repeat([]byte{'a'}, size)
+	path := writeFile(t, mkdirAll(t, filepath.Join(dir, "JOBS")), "PART.NC", content)
+	name := filepath.Join("JOBS", "PART.NC")
+	waitForEvent(t, events, isTransferEvent(name, Sending))
+
+	if err := e.SendFile(path); err != nil {
+		t.Fatalf("SendFile: %v", err)
+	}
+
+	for {
+		ev := waitForEvent(t, events, isTransferEvent(name, Sent))
+		if !asTransferEvent(t, ev).Manual {
+			t.Error("Sent event Manual = false, want true (SendFile arrived mid-transfer)")
+		}
+		if settledState(t, e, name) == Sent {
+			break
+		}
+	}
+
+	e.scheduler.mu.Lock()
+	_, rootLevelEntry := e.scheduler.items["PART.NC"]
+	_, sharedEntry := e.scheduler.items[name]
+	numItems := len(e.scheduler.items)
+	e.scheduler.mu.Unlock()
+	if rootLevelEntry {
+		t.Error("manual send created a second, root-level entry for PART.NC")
+	}
+	if !sharedEntry {
+		t.Errorf("no item under the watcher's own key %q", name)
+	}
+	if numItems != 1 {
+		t.Errorf("scheduler has %d items, want 1 (manual and automatic share one row)", numItems)
+	}
+
+	if _, ok := s.File("PART.NC"); ok {
+		t.Error("manual send went to the drive root, want the matching JOBS folder")
+	}
+	remote := masso.JoinUploadPath("JOBS", "PART.NC")
+	if got, ok := s.File(remote); !ok || !bytes.Equal(got, content) {
+		t.Errorf("sim %q = (%d bytes, %v), want the full upload", remote, len(got), ok)
+	}
+	if files := s.Files(); len(files) != 1 {
+		t.Errorf("sim received %d files, want exactly 1 (no duplicate upload)", len(files))
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("%s should remain in the watch dir (manual sends are not archived): %v", name, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sent", name)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("PART.NC must not be archived into sent/ after a manual SendFile merged with the watcher's queue")
 	}
 }

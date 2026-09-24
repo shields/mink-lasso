@@ -211,11 +211,21 @@ func (e *Engine) Retry(name string) {
 
 // SendFile validates path's base name, opens path deny-write to get its
 // authoritative size, and queues it at the front of the queue as a manual
-// send to the controller's drive root, named by that base name wherever
-// path is: subject to the machine gate like any other file, but never
-// archived, and reported with Manual: true. It returns the validation or
-// open error immediately so the caller can show it without waiting for the
-// queue.
+// send: subject to the machine gate like any other file, but never
+// archived, and reported with Manual: true. When a watch folder is
+// configured and path lies inside it, in a folder the Watcher itself would
+// walk (see watch.RelDir), the send is keyed and routed exactly as the
+// watcher's own would be — sharing that file's row if the watcher already
+// has it queued, and uploading into the matching controller folder — so
+// File → Send file… on a watched file never creates a second, duplicate
+// entry for it. Any other path — no watch folder configured, outside the
+// watched tree, or under a folder the Watcher skips — goes to the
+// controller's drive root, keyed by its base name. A folder inside the
+// watched tree that the controller cannot take is reported as an error
+// immediately, the same way the Watcher itself would reject it, rather
+// than silently queuing a send openForSend is certain to fail. It returns
+// the validation or open error immediately so the caller can show it
+// without waiting for the queue.
 func (e *Engine) SendFile(path string) error {
 	name := filepath.Base(path)
 	if err := masso.ValidateFileName(name); err != nil {
@@ -236,6 +246,38 @@ func (e *Engine) SendFile(path string) error {
 		return fmt.Errorf("engine: send file: %w", err)
 	}
 
-	e.scheduler.sendFile(name, path, info.Size(), info.ModTime())
+	e.mu.Lock()
+	watchDir := e.watchDir
+	e.mu.Unlock()
+
+	root, dir := "", ""
+	if watchDir != "" {
+		// watchDir can be relative (the -watch flag and a config file's
+		// watchDir are taken as given), while path is always the absolute
+		// path a file-open dialog returns; RelDir compares the two
+		// lexically, so both must be resolved against the same base or a
+		// relative watch folder would never match and every send inside it
+		// would silently fall back to the root-level routing below.
+		if absWatchDir, absErr := filepath.Abs(watchDir); absErr == nil {
+			if absPath, absErr := filepath.Abs(path); absErr == nil {
+				if relDir, ok := watch.RelDir(absWatchDir, absPath, winutil.IsHidden); ok {
+					// The Watcher rejects a folder the controller can't
+					// take via Options.Validate before ever emitting Ready
+					// for it; a manual send into that same shared row must
+					// fail the same way, immediately, rather than queuing
+					// a send openForSend is certain to reject.
+					if _, targetErr := uploadTarget(relDir, name); targetErr != nil {
+						return fmt.Errorf("engine: send file: %w", targetErr)
+					}
+					root, dir = watchDir, relDir
+					// The watcher's form of the path, so ready() recognizes
+					// this same file when the watcher reports it.
+					path = filepath.Join(watchDir, relDir, name)
+				}
+			}
+		}
+	}
+
+	e.scheduler.sendFile(root, dir, name, path, info.Size(), info.ModTime())
 	return nil
 }

@@ -168,7 +168,7 @@ func (s TransferState) Terminal() bool {
 type TransferEvent struct {
 	// Name identifies the file, and is what Retry takes: its path relative
 	// to the watch folder, with OS-native separators, or just its base
-	// name for a manual send.
+	// name for a manual send of a file outside the watched tree.
 	Name    string
 	Path    string
 	Size    int64

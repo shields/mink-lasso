@@ -104,6 +104,100 @@ func TestReadyDuringSendPreservesManualForResend(t *testing.T) {
 	}
 }
 
+func TestReadyLeavesManualItemAloneWhenUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		state   TransferState
+		sending bool
+	}{
+		{"sent", Sent, false},
+		{"queued", Pending, false},
+		{"waiting on the gate", Waiting, false},
+		{"in flight", Sending, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newUnitTestEngine(t, nil)
+			now := e.opts.Clock.Now()
+			it := &item{
+				name: "A.NC", state: tc.state, sending: tc.sending, manual: true,
+				path: "/watch/A.NC", size: 5, modTime: now,
+			}
+			e.scheduler.items["A.NC"] = it
+
+			e.scheduler.ready("/watch", watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 5, ModTime: now})
+
+			e.scheduler.mu.Lock()
+			defer e.scheduler.mu.Unlock()
+			if it.state != tc.state || !it.manual || it.resendAfter {
+				t.Errorf("item = (state %v, manual %v, resendAfter %v), want (%v, true, false)",
+					it.state, it.manual, it.resendAfter, tc.state)
+			}
+			if evs := takeQueued(t, e); len(evs) != 0 {
+				t.Errorf("events = %+v, want none", evs)
+			}
+		})
+	}
+}
+
+func TestReadyRearmsSentManualItemWhenChanged(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	now := e.opts.Clock.Now()
+	it := &item{name: "A.NC", state: Sent, manual: true, path: "/watch/A.NC", size: 5, modTime: now}
+	e.scheduler.items["A.NC"] = it
+
+	e.scheduler.ready("/watch", watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 6, ModTime: now})
+
+	e.scheduler.mu.Lock()
+	defer e.scheduler.mu.Unlock()
+	if it.state != Pending {
+		t.Errorf("state = %v, want Pending (content actually changed)", it.state)
+	}
+	if it.manual {
+		t.Error("manual still set after an ordinary Changed re-emission, want it cleared")
+	}
+}
+
+func TestSendFileDuringSendSameContentSkipsResend(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	now := e.opts.Clock.Now()
+	it := &item{name: "A.NC", state: Sending, sending: true, path: "/watch/A.NC", size: 5, modTime: now}
+	e.scheduler.items["A.NC"] = it
+
+	e.scheduler.sendFile("", "", "A.NC", "/watch/A.NC", 5, now)
+
+	e.scheduler.mu.Lock()
+	defer e.scheduler.mu.Unlock()
+	if it.resendAfter {
+		t.Error("resendAfter set for a manual send matching the in-flight item's own content")
+	}
+	if !it.manual {
+		t.Error("manual not set by sendFile")
+	}
+}
+
+func TestSendFileDuringSendChangedContentQueuesResend(t *testing.T) {
+	t.Parallel()
+	e := newUnitTestEngine(t, nil)
+	now := e.opts.Clock.Now()
+	it := &item{name: "A.NC", state: Sending, sending: true, path: "/watch/A.NC", size: 5, modTime: now}
+	e.scheduler.items["A.NC"] = it
+
+	e.scheduler.sendFile("", "", "A.NC", "/watch/A.NC", 6, now)
+
+	e.scheduler.mu.Lock()
+	defer e.scheduler.mu.Unlock()
+	if !it.resendAfter {
+		t.Error("resendAfter not set for a manual send with changed content")
+	}
+	if !it.manual {
+		t.Error("manual not set by sendFile")
+	}
+}
+
 func TestOpenForSendBadName(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, nil)

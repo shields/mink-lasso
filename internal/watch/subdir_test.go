@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -397,6 +398,111 @@ func TestWalkedDir(t *testing.T) {
 		if got := walkedDir(tt.relDir, tt.name); got != tt.want {
 			t.Errorf("walkedDir(%q, %q) = %v, want %v", tt.relDir, tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestRelDir(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join("base", "watch")
+	sep := string(filepath.Separator)
+	root := filepath.VolumeName(os.TempDir()) + sep
+
+	tests := []struct {
+		name       string
+		dir        string
+		path       string
+		hidden     func(string) bool
+		wantRelDir string
+		wantOK     bool
+	}{
+		{
+			name: "file at the root", dir: dir, path: filepath.Join(dir, "TOP.NC"),
+			wantRelDir: "", wantOK: true,
+		},
+		{
+			name: "file in a subfolder", dir: dir, path: filepath.Join(dir, "JOBS", "SUB", "PART.NC"),
+			wantRelDir: filepath.Join("JOBS", "SUB"), wantOK: true,
+		},
+		{
+			name: "outside the tree entirely", dir: dir, path: filepath.Join("base", "other", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "a subfolder of a filesystem root", dir: root, path: filepath.Join(root, "JOBS", "PART.NC"),
+			wantRelDir: "JOBS", wantOK: true,
+		},
+		{
+			name: "a file directly in a filesystem root", dir: root, path: filepath.Join(root, "TOP.NC"),
+			wantRelDir: "", wantOK: true,
+		},
+		{
+			name: "the filesystem root itself, not a file", dir: root, path: root,
+			wantOK: false,
+		},
+		{
+			name: "a sibling folder dir is only a string prefix of", dir: dir, path: filepath.Join("base", "watch2", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "the watched folder itself, not a file", dir: dir, path: dir,
+			wantOK: false,
+		},
+		{
+			name: "sent at the top, exact case", dir: dir, path: filepath.Join(dir, "sent", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "sent at the top, matched case-insensitively", dir: dir, path: filepath.Join(dir, "SENT", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "sent nested is not the archive folder", dir: dir, path: filepath.Join(dir, "JOBS", "sent", "PART.NC"),
+			wantRelDir: filepath.Join("JOBS", "sent"), wantOK: true,
+		},
+		{
+			name: "a dotfolder", dir: dir, path: filepath.Join(dir, ".git", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "a nested dotfolder", dir: dir, path: filepath.Join(dir, "JOBS", ".cache", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "an Office-style lock folder", dir: dir, path: filepath.Join(dir, "~$tmp", "PART.NC"),
+			wantOK: false,
+		},
+		{
+			name: "a folder Hidden reports hidden", dir: dir, path: filepath.Join(dir, "JOBS", "PART.NC"),
+			hidden: func(p string) bool { return p == filepath.Join(dir, "JOBS") },
+			wantOK: false,
+		},
+		{
+			name: "Hidden asked about a different folder", dir: dir, path: filepath.Join(dir, "JOBS", "PART.NC"),
+			hidden:     func(p string) bool { return p == filepath.Join(dir, "OTHER") },
+			wantRelDir: "JOBS", wantOK: true,
+		},
+		{
+			name:       "the watch dir given with a different case",
+			dir:        strings.ToUpper(dir),
+			path:       filepath.Join(dir, "JOBS", "PART.NC"),
+			wantRelDir: "JOBS", wantOK: true,
+		},
+		{
+			name:       "an equivalent but unclean form of both dir and path",
+			dir:        dir + sep + "sub" + sep + "..",
+			path:       dir + sep + "JOBS" + sep + "." + sep + "PART.NC",
+			wantRelDir: "JOBS", wantOK: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			relDir, ok := RelDir(tt.dir, tt.path, tt.hidden)
+			if relDir != tt.wantRelDir || ok != tt.wantOK {
+				t.Errorf("RelDir(%q, %q) = (%q, %v), want (%q, %v)",
+					tt.dir, tt.path, relDir, ok, tt.wantRelDir, tt.wantOK)
+			}
+		})
 	}
 }
 

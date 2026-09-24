@@ -214,3 +214,52 @@ func TestSendFileStatError(t *testing.T) {
 		t.Error("SendFile() error = nil, want a Stat error on an already-closed file")
 	}
 }
+
+func TestSendFileToUnroutableSubfolderFailsImmediately(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sub := mkdirAll(t, filepath.Join(dir, "30°"))
+	path := writeFile(t, sub, "A.NC", []byte("x"))
+
+	e := newUnitTestEngine(t, os.Open)
+	e.watchDir = dir
+
+	if err := e.SendFile(path); !errors.Is(err, masso.ErrBadUploadDir) {
+		t.Errorf("SendFile() error = %v, want wrapping ErrBadUploadDir", err)
+	}
+
+	e.scheduler.mu.Lock()
+	_, queued := e.scheduler.items[filepath.Join("30°", "A.NC")]
+	e.scheduler.mu.Unlock()
+	if queued {
+		t.Error("SendFile queued an item despite returning an error")
+	}
+}
+
+//nolint:paralleltest // t.Chdir cannot be used in a parallel test.
+func TestSendFileMatchesRelativeWatchDir(t *testing.T) {
+	base := t.TempDir()
+	sub := mkdirAll(t, filepath.Join(base, "watch", "JOBS"))
+	path := writeFile(t, sub, "A.NC", []byte("x"))
+	t.Chdir(base)
+
+	e := newUnitTestEngine(t, os.Open)
+	e.watchDir = "watch"
+
+	if err := e.SendFile(path); err != nil {
+		t.Fatalf("SendFile: %v", err)
+	}
+
+	e.scheduler.mu.Lock()
+	defer e.scheduler.mu.Unlock()
+	if n := len(e.scheduler.items); n != 1 {
+		t.Fatalf("scheduler has %d items, want 1 keyed into the watched subfolder", n)
+	}
+	it := e.scheduler.items[filepath.Join("JOBS", "A.NC")]
+	if it == nil {
+		t.Fatal("manual send did not key into the watched subfolder despite a relative watch folder")
+	}
+	if want := filepath.Join("watch", "JOBS", "A.NC"); it.root != "watch" || it.path != want {
+		t.Errorf("item = (root %q, path %q), want (%q, %q), the watcher's own form", it.root, it.path, "watch", want)
+	}
+}

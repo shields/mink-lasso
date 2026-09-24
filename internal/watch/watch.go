@@ -500,6 +500,54 @@ func skippedName(name string) bool {
 	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "~$")
 }
 
+// RelDir reports the folder a Watcher rooted at dir would find path's file
+// in — relative to dir, OS-native, "" for the top, exactly as File.Dir
+// reports it — and whether that folder is one the Watcher actually walks:
+// not SentDir at the top level, not a "." or "~$" folder at any depth, and
+// not a folder hidden (nil taken as never hidden) reports hidden. It
+// reports ok=false for a path outside dir entirely, for dir itself (a
+// folder, not a file), and for a file under a folder the Watcher skips.
+// Path components are compared with strings.EqualFold, since Windows and
+// macOS filesystems are case-insensitive — matching SentDir's own match —
+// and both dir and path are cleaned first so an equivalent but
+// differently-formed path still resolves the same way. The engine uses it
+// to route a manual send as the watcher would.
+func RelDir(dir, path string, hidden func(string) bool) (relDir string, ok bool) {
+	if hidden == nil {
+		hidden = func(string) bool { return false }
+	}
+
+	sep := string(filepath.Separator)
+	// A filesystem root such as E:\ or / keeps its separator when
+	// cleaned, which would otherwise split into a trailing empty
+	// component that no path matches — for both dir and path, or dir
+	// itself passed as path would split one component longer than dir
+	// and slip past the guard below.
+	dirParts := strings.Split(strings.TrimSuffix(filepath.Clean(dir), sep), sep)
+	pathParts := strings.Split(strings.TrimSuffix(filepath.Clean(path), sep), sep)
+	if len(pathParts) <= len(dirParts) {
+		return "", false
+	}
+	for i, p := range dirParts {
+		if !strings.EqualFold(p, pathParts[i]) {
+			return "", false
+		}
+	}
+
+	current := filepath.Clean(dir)
+	for _, name := range pathParts[len(dirParts) : len(pathParts)-1] {
+		if !walkedDir(relDir, name) {
+			return "", false
+		}
+		current = filepath.Join(current, name)
+		if hidden(current) {
+			return "", false
+		}
+		relDir = filepath.Join(relDir, name)
+	}
+	return relDir, true
+}
+
 func underAny(key string, dirs []string) bool {
 	return slices.ContainsFunc(dirs, func(d string) bool {
 		return strings.HasPrefix(key, d+string(filepath.Separator))
