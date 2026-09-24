@@ -116,15 +116,16 @@ def crc16_xmodem(data, crc=0x0000):
 
 `type` (byte 4) values used by the app:
 
-| Type   | Direction | Name                         | Reply                            |
-| ------ | --------- | ---------------------------- | -------------------------------- |
-| `0x02` | →         | Discovery / identity request | 46-byte identity                 |
-| `0x03` | →         | Config request (handshake)   | 10-byte serial                   |
-| `0x01` | →         | Keepalive / status request   | 270-byte status                  |
-| `0x05` | →         | Handshake step (optional)    | advances the app's state machine |
-| `0x08` | →         | Tool-table query             | 38-byte tool record              |
-| `0x0A` | →         | Upload — start               | 10-byte ACK                      |
-| `0x0B` | →         | Upload — data chunk          | 10-byte ACK                      |
+| Type   | Direction | Name                                  | Reply                            |
+| ------ | --------- | ------------------------------------- | -------------------------------- |
+| `0x02` | →         | Discovery / identity request          | 46-byte identity                 |
+| `0x03` | →         | Config request (handshake)            | 10-byte serial                   |
+| `0x01` | →         | Keepalive / status request            | 270-byte status                  |
+| `0x05` | →         | Handshake step (optional)             | advances the app's state machine |
+| `0x08` | →         | Tool-table query                      | 38-byte tool record              |
+| `0x0A` | →         | Upload — start                        | 10-byte ACK                      |
+| `0x0B` | →         | Upload — data chunk                   | 10-byte ACK                      |
+| `0x0C` | →         | Upload — post-transfer signal (v2.15) | none (§5.5)                      |
 
 Replies from the controller reuse the same `type` byte and are distinguished by
 **(length, type)**.
@@ -201,7 +202,7 @@ stops at the first empty name. (On a machine with no named tools, replies carry
 empty names.) Its receiver thread sends each next query itself, immediately
 after storing a reply.
 
-### 3.5 Upload — `0x0A` (start) and `0x0B` (data)
+### 3.5 Upload — `0x0A` (start), `0x0B` (data), and `0x0C` (post-transfer signal)
 
 See §5.
 
@@ -262,12 +263,13 @@ Payload:
                  \__ 4 bytes _/  \_2_/                                          \_reserved_/
 ```
 
-The packet's length is **not fixed**. Masso Link computes the un-padded payload
-length as `pathlen + namelen + 15` — the 15 covers the 4-byte size, the 2
-reserved bytes, the 1-byte pathlen, the NUL after the path, the NUL after the
-name, and 3 further reserved zero bytes after that NUL whose purpose is unknown
-and which no version of Masso Link reads back — then pads that to a 4-byte
-multiple exactly as §2 describes, then adds the 2-byte CRC:
+The packet's length is **not fixed**. Masso Link computes the un-padded body
+length (§2's `L`: everything after the CRC) as `pathlen + namelen + 15` — the 15
+covers the 2 magic bytes, the type byte, the 4-byte size, the 2 reserved bytes,
+the 1-byte pathlen, the NUL after the path, the NUL after the name, and 3
+further reserved zero bytes after that NUL whose purpose is unknown and which no
+version of Masso Link reads back — then pads that to a 4-byte multiple exactly
+as §2 describes, then adds the 2-byte CRC:
 
 ```
 total_bytes = 2 + (((pathlen + namelen + 15) + 3) & ~3)
