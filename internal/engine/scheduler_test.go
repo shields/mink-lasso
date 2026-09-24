@@ -37,8 +37,9 @@ import (
 // schedTestOptions returns Options wired for a fast, real-time scheduler
 // test: short watcher, backoff, and archive-retry intervals alongside
 // conn_test.go's short connection timeouts.
-func schedTestOptions(serial uint32, watchDir string) Options {
-	opts := connTestOptions(serial)
+func schedTestOptions(t *testing.T, serial uint32, watchDir string) Options {
+	t.Helper()
+	opts := connTestOptions(t, serial)
 	opts.Config.WatchDir = watchDir
 	// StallTimeout and StartTimeout decide Sent versus Failed, so like
 	// LostAfter they are long enough that load cannot trip them in a test
@@ -130,9 +131,9 @@ func TestSchedulerSendsAndArchives(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1001)
-	opts := schedTestOptions(1001, dir)
+	opts := schedTestOptions(t, 1001, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -174,9 +175,9 @@ func TestSchedulerArchiveCollisionGetsTimestamped(t *testing.T) {
 	writeFile(t, sentDir, "PART.NC", []byte("old"))
 
 	s := newConnTestSim(t, 1002)
-	opts := schedTestOptions(1002, dir)
+	opts := schedTestOptions(t, 1002, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -221,9 +222,9 @@ func TestSchedulerStartAckNoUSBThenRetrySucceeds(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1003)
-	opts := schedTestOptions(1003, dir)
+	opts := schedTestOptions(t, 1003, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -258,9 +259,9 @@ func TestSchedulerChunkCanceledNoAutoRetry(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1004)
-	opts := schedTestOptions(1004, dir)
+	opts := schedTestOptions(t, 1004, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -300,9 +301,9 @@ func TestSchedulerSilentAfterChunkIncompleteSuffixThenRetry(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1005)
-	opts := schedTestOptions(1005, dir)
+	opts := schedTestOptions(t, 1005, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 	opts.ClientOptions.ReplyTimeout = 15 * time.Millisecond
 	opts.ClientOptions.StallTimeout = 150 * time.Millisecond
 
@@ -338,9 +339,9 @@ func TestSchedulerWaitsForConnection(t *testing.T) {
 
 	// No serial configured yet: the engine idles Unconfigured, so nothing
 	// is ever connected and the gate reports "Not connected".
-	opts := schedTestOptions(0, dir)
+	opts := schedTestOptions(t, 0, dir)
 	opts.Config.Serial = ""
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -383,10 +384,10 @@ func TestSchedulerManualSendFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1007)
-	opts := schedTestOptions(1007, dir)
+	opts := schedTestOptions(t, 1007, dir)
 	opts.Config.Address = s.Addr().String()
 	opts.Config.WatchDir = "" // manual send does not require a watch folder
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -427,9 +428,9 @@ func TestSchedulerSetWatchDirClearsQueue(t *testing.T) {
 	// Left unconfigured (no serial), the connection loop never connects,
 	// so the gate reliably reports "Not connected" and OLD.NC sits
 	// Waiting instead of racing an actual send.
-	opts := schedTestOptions(0, dir1)
+	opts := schedTestOptions(t, 0, dir1)
 	opts.Config.Serial = ""
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -468,9 +469,9 @@ func TestSchedulerSetWatchDirEmitsDroppedForNonFinalItems(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 
-	opts := schedTestOptions(0, dir1)
+	opts := schedTestOptions(t, 0, dir1)
 	opts.Config.Serial = ""
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -532,9 +533,9 @@ func TestSchedulerRejectedPassthrough(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1009)
-	opts := schedTestOptions(1009, dir)
+	opts := schedTestOptions(t, 1009, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -562,9 +563,9 @@ func TestSchedulerArchiveFailureThenSentUnfiled(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1010)
-	opts := schedTestOptions(1010, dir)
+	opts := schedTestOptions(t, 1010, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	renameErr := errors.New("simulated rename failure")
 	failRename := true
@@ -634,9 +635,9 @@ func TestSchedulerChangedDuringSendingSendsTwice(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1011)
-	opts := schedTestOptions(1011, dir)
+	opts := schedTestOptions(t, 1011, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 	// A big enough file that the loopback transfer takes long enough for
 	// the watcher's own scan/settle cycle to notice a mid-transfer
 	// overwrite; both need to be fast relative to that.
@@ -684,9 +685,9 @@ func TestSchedulerSendFileDuringInFlightAutoSendResends(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1012)
-	opts := schedTestOptions(1012, dir)
+	opts := schedTestOptions(t, 1012, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -736,9 +737,9 @@ func TestRunWaitsForInFlightTransferBeforeReturning(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1013)
-	opts := schedTestOptions(1013, dir)
+	opts := schedTestOptions(t, 1013, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {

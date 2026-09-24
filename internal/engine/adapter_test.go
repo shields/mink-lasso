@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,23 +35,61 @@ import (
 	"msrl.dev/mink-lasso/internal/watch"
 )
 
-// nextAdapterTestPort hands every test in this file (and conn_test.go,
-// scheduler_test.go) its own private block of ten ports, well clear of the
-// ranges internal/masso's own test files use, so parallel test binaries
-// never collide on "address already in use". A single port would not be
-// enough for newConnTestNewClient, which gives masso.NewClient a small
-// range of its own so its retry absorbs a port a moment too slow to
+// adapterTestPortBase and adapterTestPortLimit bound the block series this
+// file (and conn_test.go, scheduler_test.go, subdir_test.go) draws private
+// ten-port blocks from for every test in this package. The range sits below
+// every OS's ephemeral port range (Linux from 32768, macOS and Windows from
+// 49152, where Windows also reserves random excluded blocks within it at
+// boot) and stays clear of internal/masso's own 30000+ series, so parallel
+// test binaries never collide on "address already in use". A single port
+// would not be enough for newConnTestNewClient, which gives masso.NewClient
+// a small range of its own so its retry absorbs a port a moment too slow to
 // release from a just-finished test.
-var nextAdapterTestPort = func() *atomic.Int32 {
-	var p atomic.Int32
-	p.Store(50000)
-	return &p
-}()
+const (
+	adapterTestPortBase   = 20000
+	adapterTestPortLimit  = 30000
+	adapterTestPortBlock  = 10
+	adapterTestPortBlocks = (adapterTestPortLimit - adapterTestPortBase) / adapterTestPortBlock
+)
 
-const adapterTestPortBlock = 10
+// nextAdapterTestBlock counts whole blocks, not ports, so that once
+// freeAdapterPort wraps it modulo adapterTestPortBlocks every block still
+// lies wholly below adapterTestPortLimit.
+var nextAdapterTestBlock atomic.Int64
 
-func freeAdapterPort() int {
-	return int(nextAdapterTestPort.Add(adapterTestPortBlock))
+const adapterTestMaxBlockProbes = 100
+
+// freeAdapterPort returns the first port of a ten-port block ([port,
+// port+adapterTestPortBlock-1]) private to this call. It skips any block
+// where something outside this test binary already holds a port or the OS
+// has excluded one, mirroring internal/masso/testutil_test.go's canBind.
+func freeAdapterPort(t *testing.T) int {
+	t.Helper()
+	for range adapterTestMaxBlockProbes {
+		n := int(nextAdapterTestBlock.Add(1)-1) % adapterTestPortBlocks
+		port := adapterTestPortBase + n*adapterTestPortBlock
+		if adapterBlockBindable(t, port) {
+			return port
+		}
+	}
+	t.Fatalf("no bindable port block in %d tries", adapterTestMaxBlockProbes)
+	return 0
+}
+
+// adapterBlockBindable probes with masso.NewClient's own bind, "udp4" on
+// 0.0.0.0, so a block it accepts is one the client can take.
+func adapterBlockBindable(t *testing.T, port int) bool {
+	t.Helper()
+	for p := port; p < port+adapterTestPortBlock; p++ {
+		pc, err := net.ListenPacket("udp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(p)))
+		if err != nil {
+			return false
+		}
+		if err := pc.Close(); err != nil {
+			t.Fatalf("closing probe socket: %v", err)
+		}
+	}
+	return true
 }
 
 // unansweredDiscoveryTargets returns a masso.Options.DiscoveryTargets naming
@@ -58,25 +97,25 @@ func freeAdapterPort() int {
 // this package's tests gets one, so its Discover sends a packet nothing
 // answers rather than broadcasting on the real network, where every
 // controller that hears the request would re-target its replies to the test.
-func unansweredDiscoveryTargets() []*net.UDPAddr {
-	return []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freeAdapterPort()}}
+func unansweredDiscoveryTargets(t *testing.T) []*net.UDPAddr {
+	t.Helper()
+	return []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freeAdapterPort(t)}}
 }
 
 // newAdapterTestClient binds a real *masso.Client on its own private port
 // with short reply timeouts, so an unanswered request fails fast.
 func newAdapterTestClient(t *testing.T) *masso.Client {
 	t.Helper()
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 	c, err := masso.NewClient(masso.Options{
-		// A single, non-retryable port (finding 5) intermittently fails
-		// to bind when something else transiently holds it for a moment
-		// (this range sits inside the OS ephemeral port range); the full
-		// ten-port block reserved above gives masso.NewClient's own
-		// retry loop room to move past that, mirroring newConnTestNewClient.
+		// The whole ten-port block, not just its first port, so
+		// masso.NewClient's own retry loop can move past a port something
+		// outside this test binary claims between freeAdapterPort's probe
+		// and this bind, mirroring newConnTestNewClient.
 		PortMin:          port,
 		PortMax:          port + adapterTestPortBlock - 1,
 		ReplyTimeout:     time.Millisecond,
-		DiscoveryTargets: unansweredDiscoveryTargets(),
+		DiscoveryTargets: unansweredDiscoveryTargets(t),
 	})
 	if err != nil {
 		t.Fatalf("masso.NewClient: %v", err)
@@ -127,7 +166,7 @@ func TestClientAdapterDiscovery(t *testing.T) {
 		t.Errorf("Discover() error = %v, want nil (timeout is not an error)", err)
 	}
 
-	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: freeAdapterPort()}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: freeAdapterPort(t)}
 	if _, _, err := a.Connect(ctx, addr); !errors.Is(err, masso.ErrNoResponse) {
 		t.Errorf("Connect() error = %v, want ErrNoResponse", err)
 	}

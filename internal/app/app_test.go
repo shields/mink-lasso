@@ -374,40 +374,55 @@ func TestMainOpenLogDefaultFails(t *testing.T) {
 // (typed-nil) Engine it got back. It holds the one UDP port the configured
 // ListenPort narrows the client's scan range to (masso.NewClient always
 // scans up to masso.ListenPortMax), so the real bind genuinely fails rather
-// than finding another free port in the range.
+// than finding another free port in the range. The hold must match
+// masso.NewClient's bind exactly, "udp4" on 0.0.0.0: on Windows a
+// dual-stack "udp" hold does not conflict with it, and Main would then run
+// headless until the timeout below.
 func TestMainNewEngineDefaultFails(t *testing.T) {
 	t.Parallel()
-	tmp := t.TempDir()
-	configPath := filepath.Join(tmp, "config.json")
+	env := testDeps(t)
+	d := env.Deps
+	stderr := env.Stderr
+	cancels := make(chan context.CancelFunc, 1)
+	notify := d.Notify
+	d.Notify = func(ctx context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := notify(ctx)
+		cancels <- cancel
+		return ctx, cancel
+	}
 
+	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Default()
 	cfg.ListenPort = masso.ListenPortMax
 	if err := cfg.Save(configPath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	held, err := net.ListenUDP("udp", &net.UDPAddr{Port: masso.ListenPortMax})
+	held, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: masso.ListenPortMax})
 	if err != nil {
 		t.Skipf("could not hold port %d to force a real bind conflict: %v", masso.ListenPortMax, err)
 	}
 	defer held.Close()
 
-	stderr := &bytes.Buffer{}
-	d := Deps{
-		Stdout:         io.Discard,
-		Stderr:         stderr,
-		UserCacheDir:   func() (string, error) { return filepath.Join(tmp, "cache"), nil },
-		Executable:     func() (string, error) { return filepath.Join(tmp, "bin", "mink-lasso"), nil },
-		SingleInstance: func(string) (func(), error) { return func() {}, nil },
-		// NewEngine is left nil on purpose, to exercise its real default.
-	}
+	// NewEngine is left nil on purpose, to exercise its real default.
+	done := make(chan int, 1)
+	go func() { done <- Main([]string{"-headless", "-config", configPath}, d) }()
 
-	code := Main([]string{"-headless", "-config", configPath}, d)
-	if code != 1 {
-		t.Errorf("Main = %d, want 1; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "Masso Link") {
-		t.Errorf("stderr = %q, want it to mention Masso Link", stderr.String())
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Errorf("Main = %d, want 1; stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "Masso Link") {
+			t.Errorf("stderr = %q, want it to mention Masso Link", stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		select {
+		case cancel := <-cancels:
+			cancel()
+		default:
+		}
+		t.Fatal("Main did not return: the held port's bind unexpectedly succeeded")
 	}
 }
 
