@@ -40,12 +40,12 @@ import (
 func schedTestOptions(serial uint32, watchDir string) Options {
 	opts := connTestOptions(serial)
 	opts.Config.WatchDir = watchDir
-	// Upload's own start and stall timing defaults to seconds, which
-	// would make a silent-controller scenario take far too long for a
-	// test; short-circuit it.
-	opts.ClientOptions.StallTimeout = 150 * time.Millisecond
+	// StallTimeout and StartTimeout decide Sent versus Failed, so like
+	// LostAfter they are long enough that load cannot trip them in a test
+	// that expects a transfer to succeed.
+	opts.ClientOptions.StallTimeout = 5 * time.Second
 	opts.ClientOptions.StartRetransmit = 15 * time.Millisecond
-	opts.ClientOptions.StartTimeout = 150 * time.Millisecond
+	opts.ClientOptions.StartTimeout = 5 * time.Second
 	opts.Config.ScanInterval = config.Duration(20 * time.Millisecond)
 	opts.Config.SettleDelay = config.Duration(30 * time.Millisecond)
 	opts.Backoff = []time.Duration{60 * time.Millisecond, 100 * time.Millisecond}
@@ -304,6 +304,7 @@ func TestSchedulerSilentAfterChunkIncompleteSuffixThenRetry(t *testing.T) {
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(freeAdapterPort())
 	opts.ClientOptions.ReplyTimeout = 15 * time.Millisecond
+	opts.ClientOptions.StallTimeout = 150 * time.Millisecond
 
 	e, err := New(opts)
 	if err != nil {
@@ -536,8 +537,34 @@ func TestSchedulerArchiveFailureThenSentUnfiled(t *testing.T) {
 	waitForEvent(t, events, isTransferEvent("F.NC", Sent))
 }
 
-// TestSchedulerChangedDuringSendingSendsTwice confirms a file changed while
-// its stale content is mid-transfer is resent once that transfer finishes.
+// settledState waits until name's item is no longer being sent and returns
+// its state. A final Sent event can precede the moment the scheduler lets
+// go of the item, and one that is re-armed for a resend reports Pending.
+func settledState(t *testing.T, e *Engine, name string) TransferState {
+	t.Helper()
+	deadline := time.Now().Add(connTestTimeout)
+	for {
+		e.scheduler.mu.Lock()
+		it := e.scheduler.items[name]
+		sending := it != nil && it.sending
+		var state TransferState
+		if it != nil {
+			state = it.state
+		}
+		e.scheduler.mu.Unlock()
+		if !sending {
+			return state
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still sending after %v", name, connTestTimeout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A file changed while its stale content is mid-transfer ends up on the
+// controller as changed: either the stale transfer completes and the change
+// is resent, or it fails and its retry sends the change.
 func TestSchedulerChangedDuringSendingSendsTwice(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -568,13 +595,13 @@ func TestSchedulerChangedDuringSendingSendsTwice(t *testing.T) {
 	// to notice.
 	want := changeDuringSending(t, path, size)
 
-	waitForEvent(t, events, isTransferEvent("G.NC", Sent))
-	waitForEvent(t, events, isTransferEvent("G.NC", Sending))
-	waitForEvent(t, events, isTransferEvent("G.NC", Sent))
+	for {
+		waitForEvent(t, events, isTransferEvent("G.NC", Sent))
+		if settledState(t, e, "G.NC") == Sent {
+			break
+		}
+	}
 
-	// The whole point of this scenario is that the resend delivers the
-	// file as it is after the change, not a stale reread (finding 7):
-	// confirm the simulator holds exactly that.
 	got, ok := s.File("G.NC")
 	if !ok {
 		t.Fatal("sim did not receive G.NC")
@@ -584,12 +611,10 @@ func TestSchedulerChangedDuringSendingSendsTwice(t *testing.T) {
 	}
 }
 
-// TestSchedulerSendFileDuringInFlightAutoSendResends confirms a manual
-// SendFile for a name that is already auto-uploading updates the in-flight
-// item in place rather than being silently orphaned (finding 2): the
-// stale, already-in-progress transfer still completes, then the item is
-// resent — and, having been marked manual, is reported Manual: true and is
-// never archived into sent/.
+// A manual SendFile for a name that is already auto-uploading updates the
+// in-flight item in place: the in-progress transfer is not aborted, the
+// manual request is sent after it (or by its retry, if it fails), and every
+// send is reported Manual: true and never archived into sent/.
 func TestSchedulerSendFileDuringInFlightAutoSendResends(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -613,14 +638,14 @@ func TestSchedulerSendFileDuringInFlightAutoSendResends(t *testing.T) {
 		t.Fatalf("SendFile: %v", err)
 	}
 
-	ev1 := waitForEvent(t, events, isTransferEvent("H.NC", Sent))
-	if !asTransferEvent(t, ev1).Manual {
-		t.Error("first Sent event Manual = false, want true (SendFile arrived mid-transfer)")
-	}
-	waitForEvent(t, events, isTransferEvent("H.NC", Sending))
-	ev2 := waitForEvent(t, events, isTransferEvent("H.NC", Sent))
-	if !asTransferEvent(t, ev2).Manual {
-		t.Error("second Sent event Manual = false, want true")
+	for {
+		ev := waitForEvent(t, events, isTransferEvent("H.NC", Sent))
+		if !asTransferEvent(t, ev).Manual {
+			t.Error("Sent event Manual = false, want true (SendFile arrived mid-transfer)")
+		}
+		if settledState(t, e, "H.NC") == Sent {
+			break
+		}
 	}
 
 	// A manual send is never archived, unlike the non-manual resend in

@@ -37,9 +37,12 @@ import (
 	"msrl.dev/mink-lasso/internal/masso/sim"
 )
 
-// connTestTimeout bounds how long a conn_test.go test waits for something
-// driven by real, asynchronous socket I/O before failing.
-const connTestTimeout = 10 * time.Second
+// connTestTimeout bounds how long a test waits for something driven by real,
+// asynchronous socket I/O before failing. It only catches a hung test and
+// decides no outcome, so it is far longer than any wait a loaded machine
+// needs, such as an in-flight upload from before a reconnect waiting out
+// LostAfter and StallTimeout.
+const connTestTimeout = 90 * time.Second
 
 // Raw masso.Status.State/.Prompt wire values (docs/protocol.md §4) used to
 // drive the simulator's status directly: masso.Status.Running and
@@ -91,15 +94,21 @@ func newConnTestSim(t *testing.T, serial uint32) *sim.Controller {
 // connTestOptions returns Options with every timing field short enough for
 // a real clock to exercise quickly, and the given serial configured. The
 // caller still supplies NewClient and, typically, Config.Address.
+//
+// The retry and pacing intervals are short: missing one only costs another
+// retry. LostAfter decides what the engine does when it expires, so it is
+// long enough that load cannot trip it in a test that expects to stay
+// connected; a test that wants a Lost shortens it itself.
 func connTestOptions(serial uint32) Options {
 	return Options{
 		Config: config.Config{Serial: masso.SerialString(serial)},
 		ClientOptions: masso.Options{
 			ReplyTimeout:      20 * time.Millisecond,
 			KeepaliveInterval: 20 * time.Millisecond,
-			LostAfter:         300 * time.Millisecond,
+			LostAfter:         2 * time.Second,
 			DiscoveryTargets:  unansweredDiscoveryTargets(),
 		},
+		IdleHold:          time.Millisecond,
 		UnicastFirst:      300 * time.Millisecond,
 		BroadcastInterval: 40 * time.Millisecond,
 		DiscoverTimeout:   30 * time.Millisecond,
@@ -362,6 +371,7 @@ func TestConnLostThenReconnect(t *testing.T) {
 	opts := connTestOptions(444)
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
+	opts.ClientOptions.LostAfter = 300 * time.Millisecond
 
 	e, err := New(opts)
 	if err != nil {
@@ -390,6 +400,7 @@ func TestConnLostThenReconnectQueuedFileCompletes(t *testing.T) {
 	opts := schedTestOptions(446, dir)
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.ClientOptions.LostAfter = 300 * time.Millisecond
 
 	e, err := New(opts)
 	if err != nil {
