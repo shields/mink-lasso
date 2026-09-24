@@ -392,17 +392,23 @@ func TestRetryOfInvalidFileRejectsAgain(t *testing.T) {
 
 func TestArchiveSentUsesSendSource(t *testing.T) {
 	t.Parallel()
-	var mkdirs, renames []string
-	e := archiveTestEngine(t, Options{
-		MkdirAll: func(p string, _ os.FileMode) error { mkdirs = append(mkdirs, p); return nil },
-		Stat:     func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
-		Rename:   func(o, n string) error { renames = append(renames, o+" -> "+n); return nil },
-	})
-	it := &item{name: "stale", root: "/other", dir: "OTHER", base: "OTHER.NC", path: "/other/OTHER/OTHER.NC"}
 	src := sendSource{
 		root: "/watch", dir: filepath.Join("JOBS", "SUB"), base: "PART.NC",
 		path: filepath.Join("/watch", "JOBS", "SUB", "PART.NC"),
 	}
+
+	var mkdirs, renames []string
+	e := archiveTestEngine(t, Options{
+		MkdirAll: func(p string, _ os.FileMode) error { mkdirs = append(mkdirs, p); return nil },
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == src.path {
+				return fakeFileInfo{}, nil // unchanged since it was sent
+			}
+			return nil, os.ErrNotExist // the sent/ destination doesn't exist yet
+		},
+		Rename: func(o, n string) error { renames = append(renames, o+" -> "+n); return nil },
+	})
+	it := &item{name: "stale", root: "/other", dir: "OTHER", base: "OTHER.NC", path: "/other/OTHER/OTHER.NC"}
 
 	e.scheduler.archiveSent(context.Background(), it, src)
 

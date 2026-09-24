@@ -525,12 +525,16 @@ func (s *scheduler) sendOne(ctx context.Context, it *item) {
 
 // sendSource is one send attempt's snapshot of where its item's file is —
 // base in the OS-native folder dir under the watch folder root, at path —
-// along with its size when opened and remoteDir, the controller folder it
-// is uploaded into. Archiving uses this snapshot rather than the item,
-// which a later watcher event may already have pointed somewhere else.
+// along with its size and modTime when opened (the deny-write open's own
+// Stat, so it reflects exactly what was uploaded) and remoteDir, the
+// controller folder it is uploaded into. Archiving uses this snapshot
+// rather than the item, which a later watcher event may already have
+// pointed somewhere else, and re-Stats path against size/modTime before
+// renaming to make sure the file on disk is still the one that was sent.
 type sendSource struct {
 	root, dir, base, path string
 	size                  int64
+	modTime               time.Time
 	remoteDir             string
 }
 
@@ -560,6 +564,7 @@ func (s *scheduler) openForSend(it *item) (*os.File, sendSource, error) {
 		return nil, sendSource{}, err
 	}
 	src.size = info.Size()
+	src.modTime = info.ModTime()
 	return f, src, nil
 }
 
@@ -630,8 +635,9 @@ func (s *scheduler) preflightFailed(it *item, err error) {
 // finishSend folds an upload attempt's outcome back into the queue: archive
 // src on success, record the failure on failure (failMsg is the caller's
 // already-resolved wording — see failureMessage — and is ignored when
-// uploadErr is nil), then — if a Changed arrived mid-transfer — immediately
-// re-queue for a resend.
+// uploadErr is nil), then — if a Changed arrived at any point while the item
+// was sending, including one archiveSent only noticed partway through its
+// own retries — immediately re-queue for a resend.
 func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, uploadErr error, failMsg string) {
 	s.mu.Lock()
 	resend := it.resendAfter
@@ -663,6 +669,15 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 		s.archiveSent(ctx, it, src)
 	}
 
+	// A Changed can arrive at any moment until it.sending clears, including
+	// during archiveSent's retries, so the flag is re-read in the same
+	// critical section that clears sending. After a failed send it is only
+	// cleared: the retry sends whatever the file holds by then.
+	s.mu.Lock()
+	resend = resend || it.resendAfter
+	it.resendAfter = false
+	it.sending = false
+
 	// Only a successful send earns an immediate re-arm to Pending: a
 	// failed send has already been recorded above, with its own backoff
 	// and failCount, by recordFailure — forcing it back to Pending here
@@ -673,8 +688,6 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 	// path/size/modTime ready() already updated in place, so nothing is
 	// lost by not resetting it here.
 	if resend && uploadErr == nil {
-		s.mu.Lock()
-		it.sending = false
 		// clearNonManual left this item in place, orphaned, only to let
 		// the in-flight transfer finish without aborting it: a queued
 		// resend belongs to the watch folder SetWatchDir already moved
@@ -682,10 +695,15 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 		// candidate pointing at that stale path (see finding 4) — drop it
 		// instead, exactly as the non-resend path already does below.
 		if it.orphaned {
-			// Sent here, since resend implies uploadErr == nil, so the drop
-			// is quiet.
-			s.dropOrphanLocked(it)
+			// archiveSent usually reaches Sent here (resend implies
+			// uploadErr == nil), but a resend arriving too late for its own
+			// stop check can leave it SentUnfiled instead — Retryable, so a
+			// discarded drop here would leave a stale, apparently-live row.
+			ev, dropped := s.dropOrphanLocked(it)
 			s.mu.Unlock()
+			if dropped {
+				s.e.dispatcher.emit(ev)
+			}
 			return
 		}
 		it.state = Pending
@@ -703,8 +721,6 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 	// now that it has fully settled with no further resend queued, drop
 	// it — it belongs to a watch folder SetWatchDir already moved away
 	// from.
-	s.mu.Lock()
-	it.sending = false
 	var ev TransferEvent
 	var dropped bool
 	if it.orphaned {
