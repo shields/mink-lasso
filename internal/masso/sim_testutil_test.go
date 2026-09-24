@@ -16,13 +16,13 @@
 // internal/masso/sim imports internal/masso, so a same-package (package
 // masso) test file cannot also import sim without an import cycle; these
 // tests live in this separate, external test package instead, using only
-// masso's exported API. The remaining Client tests, which need unexported
+// masso's exported API (plus the test-only hook exported for this purpose
+// in export_test.go). The remaining Client tests, which need unexported
 // access but not sim, stay in package masso.
 package masso_test
 
 import (
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,26 +31,9 @@ import (
 	"msrl.dev/mink-lasso/internal/masso/sim"
 )
 
-// nextTestPort hands out a distinct port on every call. Earlier this asked
-// the OS for a free port and released it for the caller to rebind, but
-// under this package's heavy test parallelism two calls could both be
-// handed the same just-released port before either rebound it, so a test's
-// NewClient would intermittently fail with "address already in use". A
-// monotonic counter gives every test a port none of the others will ever
-// try; it starts well clear of both package masso's own default
-// 11000-11050 range and testutil_test.go's counter (package masso compiles
-// into this same test binary, seeded from 30000), so the two series cannot
-// collide with each other either.
-var nextTestPort = func() *atomic.Int32 {
-	var p atomic.Int32
-	p.Store(40000)
-	return &p
-}()
-
-// freePort returns a port number private to this call, so a test can give
-// NewClient a single-port [PortMin, PortMax] range.
-func freePort(*testing.T) int {
-	return int(nextTestPort.Add(1))
+func freePort(t *testing.T) int {
+	t.Helper()
+	return masso.FreePortForTest(t)
 }
 
 // newTestClient builds a Client on its own private port using cl for all
@@ -66,11 +49,20 @@ func newTestClient(t *testing.T, cl clock.Clock) *masso.Client {
 // hears a discovery request re-targets its replies to the test.
 func newDiscoveryTestClient(t *testing.T, cl clock.Clock, discoveryTarget *net.UDPAddr) *masso.Client {
 	t.Helper()
+	return newClientWith(t, masso.Options{Clock: cl, DiscoveryTargets: []*net.UDPAddr{discoveryTarget}})
+}
+
+// newClientWith builds a Client from opts on its own private port. Unless
+// opts names DiscoveryTargets, its Discover sends only to a private loopback
+// port nothing listens on.
+func newClientWith(t *testing.T, opts masso.Options) *masso.Client {
+	t.Helper()
+	if len(opts.DiscoveryTargets) == 0 {
+		opts.DiscoveryTargets = []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freePort(t)}}
+	}
 	port := freePort(t)
-	c, err := masso.NewClient(masso.Options{
-		Clock: cl, PortMin: port, PortMax: port,
-		DiscoveryTargets: []*net.UDPAddr{discoveryTarget},
-	})
+	opts.PortMin, opts.PortMax = port, port
+	c, err := masso.NewClient(opts)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

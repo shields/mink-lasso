@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package watch watches a folder for G-code files a CAM post-processor has
-// finished writing.
+// Package watch watches a folder, and its subfolders, for G-code files a CAM
+// post-processor has finished writing.
 //
 // A post-processor writes its output in place — there is no temp-file-plus-
 // rename — so a create notification can arrive while the file is still being
@@ -24,7 +24,8 @@
 // reported once its (size, mtime) has held steady across a scan interval and
 // a minimum number of scans, and a probe confirms nothing still has it open
 // for write. Filesystem notifications, when available, only make that
-// listing happen sooner.
+// listing happen sooner, and only for the top folder: a change inside a
+// subfolder waits for the next periodic listing.
 package watch
 
 import (
@@ -45,6 +46,11 @@ import (
 // ErrDirRequired is returned by New when Options.Dir is empty.
 var ErrDirRequired = errors.New("watch: dir is required")
 
+// SentDir is the archive folder directly inside Options.Dir that a Watcher
+// never descends into, matched case-insensitively since Windows and macOS
+// filesystems are. The engine moves each sent file there.
+const SentDir = "sent"
+
 const (
 	defaultInterval = 2 * time.Second
 	defaultSettle   = 3 * time.Second
@@ -57,18 +63,26 @@ const (
 // guarantee — a caller that acts on it (uploading, say) should re-verify the
 // file immediately before use.
 type File struct {
-	Name    string
+	// Name is the file's base name.
+	Name string
+	// Dir is the file's directory relative to Options.Dir, OS-native, ""
+	// for a file directly in Options.Dir.
+	Dir     string
 	Path    string
 	Size    int64
 	ModTime time.Time
-	// Changed reports that this name was emitted before, at a different
-	// (size, mtime): the file was overwritten after its earlier send.
+	// Changed reports that this file was emitted before, at a different
+	// (size, mtime): it was overwritten after its earlier send.
 	Changed bool
 }
 
-// Rejected is a settled file whose name failed Options.Validate.
+// Rejected is a settled file that Options.Validate rejected, for its name
+// or its directory.
 type Rejected struct {
-	Name   string
+	// Name is the file's base name.
+	Name string
+	// Dir is the file's directory relative to Options.Dir, as in File.
+	Dir    string
 	Path   string
 	Reason string
 }
@@ -76,10 +90,13 @@ type Rejected struct {
 // Options configures a Watcher. Zero-value durations and nil function fields
 // take documented defaults; only Dir is required.
 type Options struct {
-	// Dir is the folder to watch, non-recursively.
+	// Dir is the folder to watch. Its subfolders are watched too, except
+	// SentDir at the top level and, at any depth, a folder whose name
+	// starts with "." or "~$" or that Hidden reports hidden. Symbolic links
+	// are not followed.
 	Dir string
 
-	// Interval is how often Dir is listed. Default 2s.
+	// Interval is how often Dir and its subfolders are listed. Default 2s.
 	Interval time.Duration
 	// Settle is how long a file's (size, mtime) must hold steady before it
 	// is considered done. Default 3s.
@@ -89,9 +106,14 @@ type Options struct {
 	// masso.Extensions.
 	Extensions []string
 
-	// Validate, when set, rejects settled file names it does not accept
-	// (returning the reason as an error). Nil accepts every name.
-	Validate func(name string) error
+	// Validate, when set, rejects settled files whose relative directory
+	// (as in File.Dir) or base name it does not accept, returning the
+	// reason as an error. Nil accepts every file.
+	Validate func(dir, name string) error
+	// Hidden, when set, reports whether the subfolder at path is hidden by
+	// something other than its name, such as a Windows file attribute.
+	// Nil reports never hidden.
+	Hidden func(path string) bool
 	// Probe, when set, reports whether a settled file is still open
 	// elsewhere (for example, for write). Nil reports never busy.
 	Probe func(path string) (busy bool, err error)
@@ -103,7 +125,7 @@ type Options struct {
 	// NewFSNotifier. When it returns an error, or when the directory is
 	// remote, the Watcher scans on Interval alone.
 	NewNotifier func(dir string) (Notifier, error)
-	// ReadDir lists Dir. Default os.ReadDir.
+	// ReadDir lists Dir and each subfolder. Default os.ReadDir.
 	ReadDir func(dir string) ([]fs.DirEntry, error)
 
 	// Clock supplies all timing. Default clock.Real{}.
@@ -131,6 +153,11 @@ type Watcher struct {
 	// (including one that finds nothing to do) so a test can wait for a
 	// scan to finish without sleeping or guessing at timing.
 	scanHook func()
+
+	// unlistable holds the relative paths of the subfolders the last
+	// complete scan could not list, so a folder that stays unlistable is
+	// logged once rather than on every scan. Only Run's goroutine uses it.
+	unlistable map[string]bool
 }
 
 // New validates opts and returns a Watcher. It does not start scanning; call
@@ -152,7 +179,10 @@ func New(opts Options) (*Watcher, error) {
 		opts.Extensions = masso.Extensions
 	}
 	if opts.Validate == nil {
-		opts.Validate = func(string) error { return nil }
+		opts.Validate = func(string, string) error { return nil }
+	}
+	if opts.Hidden == nil {
+		opts.Hidden = func(string) bool { return false }
 	}
 	if opts.Probe == nil {
 		opts.Probe = func(string) (bool, error) { return false, nil }
@@ -187,10 +217,11 @@ func New(opts Options) (*Watcher, error) {
 	}, nil
 }
 
-// Ready delivers settled files in (mtime, name) order.
+// Ready delivers settled files in (mtime, relative path) order.
 func (w *Watcher) Ready() <-chan File { return w.ready }
 
-// Rejected delivers settled files whose name Options.Validate rejected.
+// Rejected delivers settled files that Options.Validate rejected, in
+// relative path order.
 func (w *Watcher) Rejected() <-chan Rejected { return w.rejected }
 
 // Rescan asks the Watcher to list Dir soon, coalescing with any rescan
@@ -297,9 +328,10 @@ func isUNC(dir string) bool {
 	return strings.HasPrefix(dir, `\\`)
 }
 
-// entry is a Watcher's per-file bookkeeping, keyed by name. Nothing here
-// persists across a Run: the directory listing is the only source of truth,
-// so a file that vanishes from it is simply forgotten.
+// entry is a Watcher's per-file bookkeeping, keyed by its path relative to
+// Options.Dir. Nothing here persists across a Run: the directory listing is
+// the only source of truth, so a file that vanishes from it is simply
+// forgotten.
 type entry struct {
 	size    int64
 	modTime time.Time
@@ -309,7 +341,7 @@ type entry struct {
 	stableSince time.Time
 	stableScans int
 
-	// emitted and rejected record the (size, mtime) at which this name was
+	// emitted and rejected record the (size, mtime) at which this file was
 	// last sent on Ready or Rejected, so neither fires twice for the same
 	// content and a later change is detected as a change rather than a
 	// first-time event.
@@ -322,8 +354,21 @@ type entry struct {
 	rejectedModTime time.Time
 }
 
-// scan lists Dir once, updates entries, and delivers any newly settled or
-// newly rejected files. It never blocks longer than ctx allows.
+type scanState struct {
+	entries map[string]*entry
+	now     time.Time
+	seen    map[string]bool
+	// unlisted holds the relative paths of subfolders that could not be
+	// listed; entries under them are kept as they are.
+	unlisted []string
+	toEmit   []File
+	toReject []Rejected
+}
+
+// scan lists Dir and its subfolders once, updates entries, and delivers any
+// newly settled or newly rejected files. Once ctx is done it descends into
+// no further subfolders and delivers nothing more, though a ReadDir,
+// Hidden, or Probe call already under way runs to completion.
 func (w *Watcher) scan(ctx context.Context, entries map[string]*entry) {
 	if w.scanHook != nil {
 		defer w.scanHook()
@@ -335,71 +380,37 @@ func (w *Watcher) scan(ctx context.Context, entries map[string]*entry) {
 		return
 	}
 
-	now := w.opts.Clock.Now()
-	seen := make(map[string]bool, len(dirEntries))
-	var toEmit []File
-	var toReject []Rejected
+	st := &scanState{entries: entries, now: w.opts.Clock.Now(), seen: make(map[string]bool)}
+	w.scanDir(ctx, st, "", dirEntries)
 
-	for _, de := range dirEntries {
-		name := de.Name()
-		if !w.isCandidateName(name) {
-			continue
-		}
-
-		info, err := de.Info()
-		if err != nil {
-			// The file may just have vanished between listing and stat;
-			// leave its entry, if any, untouched and retry next scan.
-			w.opts.Logger.Debug("watch: could not stat file", "name", name, "error", err)
-			seen[name] = true
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		seen[name] = true
-
-		e := updateEntry(entries, name, info, now)
-
-		if e.emitted && e.emittedSize == e.size && e.emittedModTime.Equal(e.modTime) {
-			continue
-		}
-		if e.rejected && e.rejectedSize == e.size && e.rejectedModTime.Equal(e.modTime) {
-			continue
-		}
-		if e.stableScans < 2 || now.Sub(e.stableSince) < w.opts.Settle {
-			continue
-		}
-
-		if file, rejected, ok := w.settle(w.opts.Dir, name, e); ok {
-			toEmit = append(toEmit, file)
-		} else if rejected != nil {
-			toReject = append(toReject, *rejected)
+	w.unlistable = make(map[string]bool, len(st.unlisted))
+	for _, relDir := range st.unlisted {
+		w.unlistable[relDir] = true
+	}
+	for key := range entries {
+		if !st.seen[key] && !underAny(key, st.unlisted) {
+			delete(entries, key)
 		}
 	}
 
-	for name := range entries {
-		if !seen[name] {
-			delete(entries, name)
-		}
-	}
-
-	slices.SortFunc(toEmit, func(a, b File) int {
+	// Every Path is Dir joined with the relative path, so ordering by Path
+	// orders by relative path.
+	slices.SortFunc(st.toEmit, func(a, b File) int {
 		if c := a.ModTime.Compare(b.ModTime); c != 0 {
 			return c
 		}
-		return strings.Compare(a.Name, b.Name)
+		return strings.Compare(a.Path, b.Path)
 	})
-	slices.SortFunc(toReject, func(a, b Rejected) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(st.toReject, func(a, b Rejected) int { return strings.Compare(a.Path, b.Path) })
 
-	for _, f := range toEmit {
+	for _, f := range st.toEmit {
 		select {
 		case w.ready <- f:
 		case <-ctx.Done():
 			return
 		}
 	}
-	for _, r := range toReject {
+	for _, r := range st.toReject {
 		select {
 		case w.rejected <- r:
 		case <-ctx.Done():
@@ -408,14 +419,101 @@ func (w *Watcher) scan(ctx context.Context, entries map[string]*entry) {
 	}
 }
 
-// updateEntry refreshes and returns entries[name] from a freshly stat'd,
+func (w *Watcher) scanDir(ctx context.Context, st *scanState, relDir string, dirEntries []fs.DirEntry) {
+	for _, de := range dirEntries {
+		name := de.Name()
+		if de.IsDir() {
+			sub := filepath.Join(relDir, name)
+			if ctx.Err() == nil && walkedDir(relDir, name) && !w.opts.Hidden(filepath.Join(w.opts.Dir, sub)) {
+				w.scanSubdir(ctx, st, sub)
+			}
+			continue
+		}
+		if !w.isCandidateName(name) {
+			continue
+		}
+		key := filepath.Join(relDir, name)
+
+		info, err := de.Info()
+		if err != nil {
+			// The file may just have vanished between listing and stat;
+			// leave its entry, if any, untouched and retry next scan.
+			w.opts.Logger.Debug("watch: could not stat file", "name", key, "error", err)
+			st.seen[key] = true
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		st.seen[key] = true
+
+		e := updateEntry(st.entries, key, info, st.now)
+
+		if e.emitted && e.emittedSize == e.size && e.emittedModTime.Equal(e.modTime) {
+			continue
+		}
+		if e.rejected && e.rejectedSize == e.size && e.rejectedModTime.Equal(e.modTime) {
+			continue
+		}
+		if e.stableScans < 2 || st.now.Sub(e.stableSince) < w.opts.Settle {
+			continue
+		}
+
+		if file, rejected, ok := w.settle(relDir, name, e); ok {
+			st.toEmit = append(st.toEmit, file)
+		} else if rejected != nil {
+			st.toReject = append(st.toReject, *rejected)
+		}
+	}
+}
+
+// scanSubdir lists the subfolder at relDir and scans it. A folder that
+// cannot be listed is recorded in st.unlisted, so its existing entries are
+// neither forgotten nor re-emitted, and logged only when it starts or stops
+// failing: one that stays unlistable would otherwise log on every scan.
+func (w *Watcher) scanSubdir(ctx context.Context, st *scanState, relDir string) {
+	dir := filepath.Join(w.opts.Dir, relDir)
+	dirEntries, err := w.opts.ReadDir(dir)
+	if err != nil {
+		if !w.unlistable[relDir] {
+			w.opts.Logger.Warn("watch: could not list directory", "dir", dir, "error", err)
+		}
+		st.unlisted = append(st.unlisted, relDir)
+		return
+	}
+	if w.unlistable[relDir] {
+		w.opts.Logger.Info("watch: can list directory again", "dir", dir)
+	}
+	w.scanDir(ctx, st, relDir, dirEntries)
+}
+
+func walkedDir(relDir, name string) bool {
+	if skippedName(name) {
+		return false
+	}
+	return relDir != "" || !strings.EqualFold(name, SentDir)
+}
+
+// skippedName reports whether name marks a hidden entry or an Office-style
+// "~$" lock file, which the Watcher ignores whether file or folder.
+func skippedName(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "~$")
+}
+
+func underAny(key string, dirs []string) bool {
+	return slices.ContainsFunc(dirs, func(d string) bool {
+		return strings.HasPrefix(key, d+string(filepath.Separator))
+	})
+}
+
+// updateEntry refreshes and returns entries[key] from a freshly stat'd,
 // already-filtered candidate, resetting its stability tracking whenever
 // (size, mtime) changed.
-func updateEntry(entries map[string]*entry, name string, info fs.FileInfo, now time.Time) *entry {
-	e, ok := entries[name]
+func updateEntry(entries map[string]*entry, key string, info fs.FileInfo, now time.Time) *entry {
+	e, ok := entries[key]
 	if !ok {
 		e = &entry{}
-		entries[name] = e
+		entries[key] = e
 	}
 
 	size, modTime := info.Size(), info.ModTime()
@@ -430,44 +528,43 @@ func updateEntry(entries map[string]*entry, name string, info fs.FileInfo, now t
 	return e
 }
 
-// settle probes and, if free, validates a candidate whose (size, mtime) has
-// already held long enough to be considered settled, and records the
-// outcome. ok is true for a file ready to emit; a non-nil rejected reports a
-// validation failure instead.
-func (w *Watcher) settle(dir, name string, e *entry) (file File, rejected *Rejected, ok bool) {
-	path := filepath.Join(dir, name)
+// settle validates and, if valid, probes a candidate, name in the folder at
+// relDir, whose (size, mtime) has already held long enough to be considered
+// settled, and records the outcome. ok is true for a file ready to emit; a
+// non-nil rejected reports a validation failure instead. Validation comes
+// first so a file the probe cannot open, such as one past MAX_PATH, is
+// still rejected for its name or folder.
+func (w *Watcher) settle(relDir, name string, e *entry) (file File, rejected *Rejected, ok bool) {
+	path := filepath.Join(w.opts.Dir, relDir, name)
+
+	if verr := w.opts.Validate(relDir, name); verr != nil {
+		e.rejected = true
+		e.rejectedSize = e.size
+		e.rejectedModTime = e.modTime
+		return File{}, &Rejected{Name: name, Dir: relDir, Path: path, Reason: verr.Error()}, false
+	}
 
 	busy, err := w.opts.Probe(path)
 	if err != nil {
-		w.opts.Logger.Warn("watch: probe failed; treating as busy", "name", name, "error", err)
+		w.opts.Logger.Warn("watch: probe failed; treating as busy", "path", path, "error", err)
 		busy = true
 	}
 	if busy {
 		return File{}, nil, false
 	}
 
-	if verr := w.opts.Validate(name); verr != nil {
-		e.rejected = true
-		e.rejectedSize = e.size
-		e.rejectedModTime = e.modTime
-		return File{}, &Rejected{Name: name, Path: path, Reason: verr.Error()}, false
-	}
-
 	changed := e.emitted
 	e.emitted = true
 	e.emittedSize = e.size
 	e.emittedModTime = e.modTime
-	return File{Name: name, Path: path, Size: e.size, ModTime: e.modTime, Changed: changed}, nil, true
+	return File{Name: name, Dir: relDir, Path: path, Size: e.size, ModTime: e.modTime, Changed: changed}, nil, true
 }
 
-// isCandidateName reports whether name is a file this Watcher tracks at all,
-// based on its name alone (no I/O): a recognized extension, not a partial or
-// hidden file. This also keeps the sent/ archive directory out of
-// consideration, since directory names typically have no matching extension
-// — and even one that did would still be excluded once stat'd, for not being
-// a regular file.
+// isCandidateName reports whether a non-directory entry called name is a
+// file this Watcher tracks at all, based on its name alone (no I/O): a
+// recognized extension, not a partial or hidden file.
 func (w *Watcher) isCandidateName(name string) bool {
-	if strings.HasPrefix(name, "~$") || strings.HasPrefix(name, ".") {
+	if skippedName(name) {
 		return false
 	}
 	lower := strings.ToLower(name)

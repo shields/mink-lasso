@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -180,8 +179,11 @@ func TestNewDefaults(t *testing.T) {
 	if len(w.opts.Extensions) != len(masso.Extensions) {
 		t.Errorf("Extensions = %v, want %v", w.opts.Extensions, masso.Extensions)
 	}
-	if err := w.opts.Validate("anything.nc"); err != nil {
+	if err := w.opts.Validate("", "anything.nc"); err != nil {
 		t.Errorf("default Validate rejected: %v", err)
+	}
+	if w.opts.Hidden("/some/dir") {
+		t.Error("default Hidden = true, want false")
 	}
 	if busy, err := w.opts.Probe("/some/path"); busy || err != nil {
 		t.Errorf("default Probe = (%v, %v), want (false, nil)", busy, err)
@@ -290,7 +292,7 @@ func TestScanAbortsRejectOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "job.nc"), "G0")
 
-	validate := func(string) error { return errors.New("bad name") }
+	validate := func(string, string) error { return errors.New("bad name") }
 	clk := clock.NewFake(time.Now())
 	w, err := New(Options{
 		Dir: dir, Interval: testInterval, Settle: testSettle, Clock: clk,
@@ -457,7 +459,7 @@ func TestRejectedSortOrder(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "zzz.nc"), "G0")
 	writeFile(t, filepath.Join(dir, "aaa.nc"), "G0")
 
-	validate := func(name string) error { return errors.New("bad: " + name) }
+	validate := func(_, name string) error { return errors.New("bad: " + name) }
 	h := newHarness(t, Options{Dir: dir, Interval: testInterval, Settle: testSettle, Validate: validate})
 
 	settleFile(h)
@@ -496,7 +498,7 @@ func TestRejectedOnceThenAgainAfterChange(t *testing.T) {
 	path := filepath.Join(dir, "BADNAME.nc")
 	writeFile(t, path, "G0 X0\n")
 
-	validate := func(name string) error {
+	validate := func(_, name string) error {
 		return errors.New("name too long: " + name)
 	}
 	h := newHarness(t, Options{Dir: dir, Interval: testInterval, Settle: testSettle, Validate: validate})
@@ -785,7 +787,7 @@ func TestNotifierHintDebouncesEarlyScan(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "job.nc"), "G0")
 
-	fn := newFakeNotifier()
+	fn := &fakeNotifier{events: make(chan struct{}), errors: make(chan error, 1)}
 	var calls atomic.Int32
 	readDir := func(d string) ([]fs.DirEntry, error) {
 		calls.Add(1)
@@ -798,30 +800,18 @@ func TestNotifierHintDebouncesEarlyScan(t *testing.T) {
 		NewNotifier: func(string) (Notifier, error) { return fn, nil },
 	})
 
+	// The hints are unbuffered and the rescan queues behind them, so the
+	// Watcher has finished handling both hints before the clock moves.
 	fn.events <- struct{}{}
-	h.clk.BlockUntil(2) // ticker + debounce timer now registered
-
-	// A second hint before the debounce fires resets it (rather than
-	// scheduling a second one) and still coalesces to a single scan.
-	// Nothing about sending to fn.events or calling Advance (a fake-clock
-	// call the Watcher goroutine isn't blocked on) forces that goroutine
-	// to run before this test proceeds, so without yielding here, Advance
-	// below can reach and fire the still-unreset original deadline before
-	// the Watcher goroutine ever receives this second hint; Reset would
-	// then apply to an already-fired timer, rescheduling it a further
-	// Debounce past the point this test actually advances to, and the
-	// expected scan would never come. Yielding repeatedly gives the
-	// runtime every opportunity to run that goroutine (through the
-	// receive and the Reset call) before Advance runs.
 	fn.events <- struct{}{}
-	for range 1000 {
-		runtime.Gosched()
-	}
+	h.w.Rescan()
+	h.waitScan()
+	before := calls.Load()
 
 	h.clk.Advance(testDebounce)
 	h.waitScan()
 
-	if got := calls.Load(); got != 1 {
+	if got := calls.Load() - before; got != 1 {
 		t.Fatalf("ReadDir called %d times after the debounce fired, want 1", got)
 	}
 }
@@ -949,4 +939,14 @@ func (h *memHandler) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.records)
+}
+
+func (h *memHandler) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.records))
+	for i, r := range h.records {
+		out[i] = r.Message
+	}
+	return out
 }

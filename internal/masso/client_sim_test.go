@@ -40,9 +40,6 @@ func (e errReaderAt) ReadAt([]byte, int64) (int, error) { return 0, e.err }
 // document for a request bounded by Options.ReplyTimeout.
 const testAttempts = 3
 
-// testMaxToolIndex mirrors the highest tool index Tools documents querying.
-const testMaxToolIndex = 118
-
 func TestReaderDropsUndecodablePacket(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -228,30 +225,42 @@ func TestRunCtxCancelMidRun(t *testing.T) {
 	}
 }
 
-func TestToolsFullTable(t *testing.T) {
+func TestToolsRespectsMaxTools(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
-	names := make([]string, testMaxToolIndex)
+	names := make([]string, 120)
 	for i := range names {
 		names[i] = fmt.Sprintf("T%d", i+1)
 	}
-	s := newSim(t, sim.Options{Serial: 1, Tools: names})
-	c := newTestClient(t, clock.Real{})
-	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
+	for _, tc := range []struct {
+		name    string
+		serial  uint32
+		version string
+		want    int
+	}{
+		{"small serial", 5000, "5-Axis v5.13", 32},
+		{"small serial lathe", 5000, "Lathe v5.09", 32},
+		{"lathe", 5001, "Lathe v5.09", 100},
+		{"lathe any case", 31578, "2-Axis LATHE v5.13", 100},
+		{"mill", 5001, "5-Axis v5.13", 118},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSim(t, sim.Options{Serial: tc.serial, Version: tc.version, Tools: names})
+			c, _ := newFakeClockClient(t, s, masso.Options{})
 
-	got, err := c.Tools(ctx)
-	if err != nil {
-		t.Fatalf("Tools: %v", err)
-	}
-	if len(got) != len(names) {
-		t.Fatalf("len(Tools()) = %d, want %d", len(got), len(names))
-	}
-	for i, tr := range got {
-		if int(tr.Index) != i+1 || tr.Name != names[i] {
-			t.Errorf("Tools()[%d] = %+v, want {Index:%d Name:%q}", i, tr, i+1, names[i])
-		}
+			got, err := c.Tools(t.Context())
+			if err != nil {
+				t.Fatalf("Tools: %v", err)
+			}
+			if len(got) != tc.want {
+				t.Fatalf("len(Tools()) = %d, want %d", len(got), tc.want)
+			}
+			for i, tr := range got {
+				if int(tr.Index) != i+1 || tr.Name != names[i] {
+					t.Errorf("Tools()[%d] = %+v, want {Index:%d Name:%q}", i, tr, i+1, names[i])
+				}
+			}
+		})
 	}
 }
 
@@ -355,7 +364,7 @@ func TestUploadBadFileName(t *testing.T) {
 	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	err := c.Upload(ctx, "bad/name.nc", bytes.NewReader(testData(1)), 1, nil)
+	err := c.Upload(ctx, "", "bad/name.nc", bytes.NewReader(testData(1)), 1, nil)
 	if !errors.Is(err, masso.ErrBadFileName) {
 		t.Fatalf("Upload = %v, want ErrBadFileName", err)
 	}
@@ -377,7 +386,7 @@ func TestUploadSizes(t *testing.T) {
 			data := testData(size)
 			name := fmt.Sprintf("U%d.NC", size)
 			var events []progressEvent
-			err := c.Upload(ctx, name, bytes.NewReader(data), int64(size), func(sent, total int64) {
+			err := c.Upload(ctx, "", name, bytes.NewReader(data), int64(size), func(sent, total int64) {
 				events = append(events, progressEvent{sent, total})
 			})
 			if err != nil {
@@ -411,92 +420,168 @@ func TestUploadSizes(t *testing.T) {
 	}
 }
 
-func TestUploadDroppedAckRetransmits(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	s := newSim(t, sim.Options{Serial: 1})
-	s.SetDropAck(func(idx uint32) bool { return idx == 0 })
-
-	const retransmit = 20 * time.Millisecond
-	fc := clock.NewFake(time.Unix(0, 0))
-	port := freePort(t)
-	c, err := masso.NewClient(masso.Options{Clock: fc, PortMin: port, PortMax: port, Retransmit: retransmit})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+// eventually polls cond until it holds, failing the test if it does not
+// within safetyNet. It waits only on asynchronous loopback delivery to the
+// simulator, never on anything a fake clock drives.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(safetyNet)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
-	t.Cleanup(func() { _ = c.Close() })
-	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
+}
+
+// expectAborts waits for s to have received exactly want upload-abort
+// notifications.
+func expectAborts(t *testing.T, s *sim.Controller, want int) {
+	t.Helper()
+	eventually(t, fmt.Sprintf("%d upload-abort notifications", want), func() bool { return s.Aborts() >= want })
+	if got := s.Aborts(); got != want {
+		t.Fatalf("Aborts() = %d, want %d", got, want)
+	}
+}
+
+// newFakeClockClient returns a Client connected to s, timed by a fake clock
+// that nothing advances unless the test does.
+func newFakeClockClient(t *testing.T, s *sim.Controller, opts masso.Options) (*masso.Client, *clock.Fake) {
+	t.Helper()
+	fc := clock.NewFake(time.Unix(0, 0))
+	opts.Clock = fc
+	c := newClientWith(t, opts)
+	if _, _, err := c.Connect(t.Context(), s.Addr()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
+	return c, fc
+}
 
-	data := testData(10)
-	progressCh := make(chan progressEvent, 8)
+// uploadInBackground starts c.Upload of data as name, reporting progress
+// and the result on the returned channels.
+func uploadInBackground(
+	ctx context.Context, c *masso.Client, dir, name string, data []byte,
+) (<-chan progressEvent, <-chan error) {
+	progressCh := make(chan progressEvent, 64)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.Upload(ctx, "DROP.NC", bytes.NewReader(data), int64(len(data)), func(sent, total int64) {
+		errCh <- c.Upload(ctx, dir, name, bytes.NewReader(data), int64(len(data)), func(sent, total int64) {
 			progressCh <- progressEvent{sent, total}
 		})
 	}()
+	return progressCh, errCh
+}
 
-	first := waitFor(t, progressCh)
-	if first != (progressEvent{0, int64(len(data))}) {
-		t.Fatalf("first progress = %+v", first)
+func TestUploadLostChunkRecovered(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		set  func(*sim.Controller, func(uint32) bool)
+	}{
+		{"request lost", (*sim.Controller).SetDropChunk},
+		{"reply lost", (*sim.Controller).SetDropAck},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSim(t, sim.Options{Serial: 1})
+			tc.set(s, func(idx uint32) bool { return idx == 0 })
+			c, fc := newFakeClockClient(t, s, masso.Options{})
+
+			data := testData(10)
+			progressCh, errCh := uploadInBackground(t.Context(), c, "", "DROP.NC", data)
+			if first := waitFor(t, progressCh); first != (progressEvent{0, 10}) {
+				t.Fatalf("first progress = %+v", first)
+			}
+
+			// Chunk 0 went unacknowledged; the retransmit timeout starts
+			// at twice the 60ms seed.
+			fc.BlockUntil(1)
+			fc.Advance(120 * time.Millisecond)
+
+			if second := waitFor(t, progressCh); second != (progressEvent{10, 10}) {
+				t.Fatalf("second progress = %+v", second)
+			}
+			if err := waitFor(t, errCh); err != nil {
+				t.Fatalf("Upload: %v", err)
+			}
+			got, ok := s.File("DROP.NC")
+			if !ok || !bytes.Equal(got, data) {
+				t.Fatal("stored file mismatch")
+			}
+			if n := s.ChunkRequests(); n != 2 {
+				t.Fatalf("ChunkRequests() = %d, want 2", n)
+			}
+			if n := s.Aborts(); n != 0 {
+				t.Fatalf("Aborts() = %d, want 0", n)
+			}
+		})
 	}
+}
 
-	// Chunk 0's ack was dropped once; force the retransmit.
-	fc.BlockUntil(2)
-	fc.Advance(retransmit)
+func TestUploadLostStartAck(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		result byte
+	}{
+		{"then OK", masso.StartOK},
+		{"then already started", masso.StartAlreadyStarted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSim(t, sim.Options{Serial: 1})
+			s.SetStartResult(tc.result)
+			s.SetDropStartAcks(1)
+			c, fc := newFakeClockClient(t, s, masso.Options{})
 
-	second := waitFor(t, progressCh)
-	if second != (progressEvent{int64(len(data)), int64(len(data))}) {
-		t.Fatalf("second progress = %+v", second)
-	}
+			data := testData(masso.MaxChunkData + 1)
+			progressCh, errCh := uploadInBackground(t.Context(), c, "JOBS", "LOST.NC", data)
+			fc.BlockUntil(1)
+			fc.Advance(time.Second)
 
-	if err := waitFor(t, errCh); err != nil {
-		t.Fatalf("Upload: %v", err)
-	}
-	got, ok := s.File("DROP.NC")
-	if !ok || !bytes.Equal(got, data) {
-		t.Fatal("stored file mismatch")
+			if first := waitFor(t, progressCh); first != (progressEvent{0, int64(len(data))}) {
+				t.Fatalf("first progress = %+v", first)
+			}
+			if err := waitFor(t, errCh); err != nil {
+				t.Fatalf("Upload: %v", err)
+			}
+			got, ok := s.File(`JOBS\LOST.NC`)
+			if !ok || !bytes.Equal(got, data) {
+				t.Fatal("stored file mismatch")
+			}
+		})
 	}
 }
 
 func TestUploadSilentAfterChunkErrNoResponse(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 1})
 	s.SetSilentAfterChunk(0)
-
-	const stallTimeout = 100 * time.Millisecond
-	fc := clock.NewFake(time.Unix(0, 0))
-	port := freePort(t)
-	c, err := masso.NewClient(masso.Options{Clock: fc, PortMin: port, PortMax: port, StallTimeout: stallTimeout})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
-	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
+	const stallTimeout = 50 * time.Millisecond
+	const abortInterval = 20 * time.Millisecond
+	c, fc := newFakeClockClient(t, s, masso.Options{StallTimeout: stallTimeout, AbortInterval: abortInterval})
 
 	data := testData(masso.MaxChunkData + 10)
-	progressCh := make(chan progressEvent, 8)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- c.Upload(ctx, "SILENT.NC", bytes.NewReader(data), int64(len(data)), func(sent, total int64) {
-			progressCh <- progressEvent{sent, total}
-		})
-	}()
-
+	progressCh, errCh := uploadInBackground(t.Context(), c, "", "SILENT.NC", data)
 	waitFor(t, progressCh) // start ack
 	waitFor(t, progressCh) // chunk 0 accepted
 
-	// Chunk 1's wait now stalls forever: nothing further will ever answer.
-	fc.BlockUntil(2)
+	// Chunk 1 is never answered, and the stall timeout is shorter than the
+	// retransmit timeout.
+	fc.BlockUntil(1)
 	fc.Advance(stallTimeout)
+	for range 2 {
+		fc.BlockUntil(1)
+		fc.Advance(abortInterval)
+	}
 
 	if err := waitFor(t, errCh); !errors.Is(err, masso.ErrNoResponse) {
 		t.Fatalf("Upload = %v, want ErrNoResponse", err)
+	}
+	expectAborts(t, s, 3)
+	eventually(t, "chunk 1 to reach the simulator", func() bool { return s.ChunkRequests() == 2 })
+	if _, ok := s.File("SILENT.NC"); ok {
+		t.Fatal("file stored despite the stall")
 	}
 }
 
@@ -508,21 +593,21 @@ func TestUploadStartResults(t *testing.T) {
 		want   error
 	}{
 		{"no USB", masso.StartNoUSB, masso.ErrNoUSB},
+		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransfer},
 		{"other error", 0x42, masso.ErrTransfer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := t.Context()
 			s := newSim(t, sim.Options{Serial: 1})
 			s.SetStartResult(tc.result)
-			c := newTestClient(t, clock.Real{})
-			if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
-				t.Fatalf("Connect: %v", err)
-			}
-			err := c.Upload(ctx, "ST.NC", bytes.NewReader(testData(1)), 1, nil)
+			c, _ := newFakeClockClient(t, s, masso.Options{})
+			err := c.Upload(t.Context(), "", "ST.NC", bytes.NewReader(testData(1)), 1, nil)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
+			}
+			if _, ok := s.File("ST.NC"); ok {
+				t.Fatal("file stored despite the refused start")
 			}
 		})
 	}
@@ -537,6 +622,7 @@ func TestUploadChunkResults(t *testing.T) {
 	}{
 		{"usb write error", masso.ChunkUSBWriteError, masso.ErrUSBWrite},
 		{"canceled", masso.ChunkCanceled, masso.ErrCanceled},
+		{"other error", 0x42, masso.ErrTransfer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -548,10 +634,11 @@ func TestUploadChunkResults(t *testing.T) {
 				t.Fatalf("Connect: %v", err)
 			}
 			s.SetChunkResult(tc.result)
-			err := c.Upload(ctx, "CH.NC", bytes.NewReader(testData(1)), 1, nil)
+			err := c.Upload(ctx, "", "CH.NC", bytes.NewReader(testData(1)), 1, nil)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
 			}
+			expectAborts(t, s, 3)
 		})
 	}
 }
@@ -565,10 +652,11 @@ func TestUploadReaderAtError(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 	readErr := errors.New("disk exploded")
-	err := c.Upload(ctx, "RD.NC", errReaderAt{readErr}, 10, nil)
+	err := c.Upload(ctx, "", "RD.NC", errReaderAt{readErr}, 10, nil)
 	if !errors.Is(err, masso.ErrRead) {
 		t.Fatalf("Upload = %v, want ErrRead", err)
 	}
+	expectAborts(t, s, 3)
 }
 
 func TestUploadCtxAlreadyCanceled(t *testing.T) {
@@ -580,7 +668,7 @@ func TestUploadCtxAlreadyCanceled(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 	cancel()
-	err := c.Upload(ctx, "CX.NC", bytes.NewReader(testData(1)), 1, nil)
+	err := c.Upload(ctx, "", "CX.NC", bytes.NewReader(testData(1)), 1, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Upload = %v, want context.Canceled", err)
 	}
@@ -599,13 +687,16 @@ func TestUploadCtxCancelMidWait(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.Upload(ctx, "MW.NC", bytes.NewReader(testData(1)), 1, nil)
+		errCh <- c.Upload(ctx, "", "MW.NC", bytes.NewReader(testData(1)), 1, nil)
 	}()
-	fc.BlockUntil(2)
+	fc.BlockUntil(1)
 	cancel()
 
 	if err := waitFor(t, errCh); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Upload = %v, want context.Canceled", err)
+	}
+	if n := s.Aborts(); n != 0 {
+		t.Fatalf("Aborts() = %d, want 0", n)
 	}
 }
 
@@ -628,7 +719,7 @@ func TestUploadCtxCancelAfterStartDoesNotAbort(t *testing.T) {
 	name := "CANCELED.NC"
 
 	var canceledOnce bool
-	err := c.Upload(ctx, name, bytes.NewReader(data), int64(size), func(_, _ int64) {
+	err := c.Upload(ctx, "", name, bytes.NewReader(data), int64(size), func(_, _ int64) {
 		// The start ACK has already landed by the time progress is first
 		// called (with sent==0), so the transfer is "acknowledged as
 		// started" from that point on; canceling here must not abort it.
@@ -664,11 +755,11 @@ func TestUploadConcurrentErrBusy(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Upload(ctx, "BUSY1.NC", bytes.NewReader(testData(10)), 10, nil)
+		done <- c.Upload(ctx, "", "BUSY1.NC", bytes.NewReader(testData(10)), 10, nil)
 	}()
-	fc.BlockUntil(2) // goroutine 1 is now deep in sendUntilStall; uploadMu is held
+	fc.BlockUntil(1) // goroutine 1 is now waiting for the start ACK; uploadMu is held
 
-	err := c.Upload(ctx, "BUSY2.NC", bytes.NewReader(testData(1)), 1, nil)
+	err := c.Upload(ctx, "", "BUSY2.NC", bytes.NewReader(testData(1)), 1, nil)
 	if !errors.Is(err, masso.ErrBusy) {
 		t.Fatalf("second Upload = %v, want ErrBusy", err)
 	}
@@ -691,7 +782,7 @@ func TestUploadStrayIdentityDoesNotWedge(t *testing.T) {
 	fake := rawConn(t)
 	caddr := clientAddr(c)
 	data := testData(masso.MaxChunkData + 10)
-	err := c.Upload(ctx, "STRAY.NC", bytes.NewReader(data), int64(len(data)), func(int64, int64) {
+	err := c.Upload(ctx, "", "STRAY.NC", bytes.NewReader(data), int64(len(data)), func(int64, int64) {
 		// Inject a stray Identity reply, as if from another controller
 		// answering a broadcast, partway through the transfer.
 		mustSend(t, fake, caddr, masso.Identity{Serial: 999, Version: "stray"}.Encode())

@@ -82,7 +82,7 @@ func (e *Engine) runConnAttempt(ctx context.Context) {
 // to UnicastFirst, matching only a reply whose Identity.Serial is serial;
 // then broadcast Discover at most once per BroadcastInterval, connecting to
 // the first Found that matches.
-func (e *Engine) discoverAndConnect(ctx context.Context, serial uint16) (*net.UDPAddr, masso.Identity, error) {
+func (e *Engine) discoverAndConnect(ctx context.Context, serial uint32) (*net.UDPAddr, masso.Identity, error) {
 	deadline := e.opts.Clock.Now().Add(e.opts.UnicastFirst)
 	if candidates := e.candidateAddrs(); len(candidates) > 0 {
 		for e.opts.Clock.Now().Before(deadline) {
@@ -140,7 +140,7 @@ func (e *Engine) candidateAddrs() []*net.UDPAddr {
 
 // broadcastConnect rations a Discover broadcast to at most once per
 // BroadcastInterval, connecting to the first Found whose serial matches.
-func (e *Engine) broadcastConnect(ctx context.Context, serial uint16) (*net.UDPAddr, masso.Identity, error) {
+func (e *Engine) broadcastConnect(ctx context.Context, serial uint32) (*net.UDPAddr, masso.Identity, error) {
 	ticker := e.opts.Clock.NewTicker(e.opts.BroadcastInterval)
 	defer ticker.Stop()
 
@@ -188,7 +188,7 @@ func (e *Engine) broadcastConnect(ctx context.Context, serial uint16) (*net.UDPA
 // requests, and returns when the client's keepalive loop ends — emitting
 // Lost unless ctx is done (a restart or shutdown already in progress, which
 // the caller reports itself).
-func (e *Engine) runConnected(ctx context.Context, serial uint16, addr *net.UDPAddr) {
+func (e *Engine) runConnected(ctx context.Context, serial uint32, addr *net.UDPAddr) {
 	e.fetchTools(ctx)
 
 	statusCtx, statusCancel := context.WithCancel(ctx)
@@ -228,7 +228,7 @@ func (e *Engine) fetchTools(ctx context.Context) {
 // SetSerial reconfigures the connection loop's target serial (0 means
 // unconfigured) and restarts it from Discovering, with the unicast-first
 // window reset.
-func (e *Engine) SetSerial(serial uint16) {
+func (e *Engine) SetSerial(serial uint32) {
 	e.mu.Lock()
 	e.serial = serial
 	// lastAddr belongs to the previous serial; candidateAddrs must not

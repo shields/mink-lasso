@@ -16,7 +16,9 @@ package masso
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -35,11 +37,11 @@ func TestIdentityEncodeLayout(t *testing.T) {
 	if pkt[4] != TypeDiscovery {
 		t.Errorf("type = %#02x, want %#02x", pkt[4], TypeDiscovery)
 	}
-	if serial := uint16(pkt[5]) | uint16(pkt[6])<<8; serial != 12345 {
+	if serial := binary.LittleEndian.Uint32(pkt[5:9]); serial != 12345 {
 		t.Errorf("serial = %d, want 12345", serial)
 	}
-	if pkt[12] != versionMarker {
-		t.Errorf("pkt[12] = %#02x, want the version marker %#02x", pkt[12], byte(versionMarker))
+	if pkt[12] != identityByte12 {
+		t.Errorf("pkt[12] = %#02x, want %#02x", pkt[12], byte(identityByte12))
 	}
 	if !bytes.HasPrefix(pkt[13:], []byte("5-Axis v5.13\x00")) {
 		t.Errorf("version field = %q, want %q", pkt[13:29], "5-Axis v5.13\x00")
@@ -49,7 +51,7 @@ func TestIdentityEncodeLayout(t *testing.T) {
 func TestIdentityRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	want := Identity{Serial: 54321, Version: "5-Axis v5.13"}
+	want := Identity{Serial: 4000054321, Version: "5-Axis v5.13"}
 	got, err := DecodeReply(want.Encode())
 	if err != nil {
 		t.Fatalf("DecodeReply: unexpected error: %v", err)
@@ -67,22 +69,59 @@ func TestIdentityEncodeTruncatesLongVersion(t *testing.T) {
 	if len(pkt) != identityLen {
 		t.Fatalf("len(pkt) = %d, want %d", len(pkt), identityLen)
 	}
-	if _, err := DecodeReply(pkt); err != nil {
-		t.Errorf("DecodeReply: unexpected error: %v", err)
+	got, err := DecodeReply(pkt)
+	if err != nil {
+		t.Fatalf("DecodeReply: unexpected error: %v", err)
+	}
+	want := r.Version[:versionEnd-versionStart]
+	if id, ok := got.(Identity); !ok || id.Version != want {
+		t.Errorf("DecodeReply = %#v, want Identity with Version %q", got, want)
 	}
 }
 
-func TestDecodeIdentityRejectsMissingMarker(t *testing.T) {
+// With no NUL anywhere from byte 13 on, only the byte-41 bound can end the
+// version string.
+func TestDecodeIdentityStopsAtByte41(t *testing.T) {
 	t.Parallel()
 
 	pkt := make([]byte, identityLen)
 	pkt[2], pkt[3] = magic[0], magic[1]
 	pkt[4] = TypeDiscovery
-	crc := crc16XModem(pkt[2:])
-	pkt[0], pkt[1] = byte(crc), byte(crc>>8)
+	binary.LittleEndian.PutUint32(pkt[5:9], 7)
+	for i := versionStart; i < identityLen; i++ {
+		pkt[i] = 'V'
+	}
+	binary.LittleEndian.PutUint16(pkt[0:2], crc16XModem(pkt[2:]))
 
-	if _, err := DecodeReply(pkt); !errors.Is(err, ErrMalformed) {
-		t.Errorf("DecodeReply: err = %v, want ErrMalformed", err)
+	got, err := DecodeReply(pkt)
+	if err != nil {
+		t.Fatalf("DecodeReply: unexpected error: %v", err)
+	}
+	want := Identity{Serial: 7, Version: strings.Repeat("V", 29)}
+	if got != want {
+		t.Errorf("DecodeReply = %#v, want %#v", got, want)
+	}
+}
+
+func TestIdentityMaxTools(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		id   Identity
+		want int
+	}{
+		{Identity{Serial: 0, Version: "5-Axis v5.13"}, 32},
+		{Identity{Serial: 5000, Version: "Lathe v5.09"}, 32},
+		{Identity{Serial: 5001, Version: "5-Axis v5.13"}, 118},
+		{Identity{Serial: 31578, Version: "Lathe v5.09"}, 100},
+		{Identity{Serial: 31578, Version: "2-Axis LATHE v5.09"}, 100},
+		{Identity{Serial: 31578, Version: "lathe"}, 100},
+		{Identity{Serial: 31578, Version: ""}, 118},
+	}
+	for _, tt := range tests {
+		if got := tt.id.MaxTools(); got != tt.want {
+			t.Errorf("%#v.MaxTools() = %d, want %d", tt.id, got, tt.want)
+		}
 	}
 }
 
@@ -159,13 +198,35 @@ func TestStatusRoundTrip(t *testing.T) {
 func TestStatusEncodeTruncatesLongFile(t *testing.T) {
 	t.Parallel()
 
-	r := Status{File: string(bytes.Repeat([]byte{'X'}, 300))}
+	r := Status{File: strings.Repeat("X", 300)}
 	pkt := r.Encode()
 	if len(pkt) != statusLen {
 		t.Fatalf("len(pkt) = %d, want %d", len(pkt), statusLen)
 	}
-	if _, err := DecodeReply(pkt); err != nil {
-		t.Errorf("DecodeReply: unexpected error: %v", err)
+	got, err := DecodeReply(pkt)
+	if err != nil {
+		t.Fatalf("DecodeReply: unexpected error: %v", err)
+	}
+	if st, ok := got.(Status); !ok || st.File != strings.Repeat("X", MaxStatusFile) {
+		t.Errorf("DecodeReply = %#v, want Status with %d X's as File", got, MaxStatusFile)
+	}
+}
+
+func TestDecodeStatusStopsAtByte49(t *testing.T) {
+	t.Parallel()
+
+	pkt := Status{File: strings.Repeat("F", MaxStatusFile)}.Encode()
+	for i := statusFileStart + MaxStatusFile; i < statusLen; i++ {
+		pkt[i] = 'R'
+	}
+	binary.LittleEndian.PutUint16(pkt[0:2], crc16XModem(pkt[2:]))
+
+	got, err := DecodeReply(pkt)
+	if err != nil {
+		t.Fatalf("DecodeReply: unexpected error: %v", err)
+	}
+	if st, ok := got.(Status); !ok || st.File != strings.Repeat("F", MaxStatusFile) {
+		t.Errorf("DecodeReply = %#v, want Status with %d F's as File", got, MaxStatusFile)
 	}
 }
 
@@ -209,6 +270,7 @@ func TestStartAckRoundTripAndErr(t *testing.T) {
 	}{
 		{"ok", StartOK, nil},
 		{"no usb", StartNoUSB, ErrNoUSB},
+		{"already started", StartAlreadyStarted, ErrTransfer},
 		{"other", 0x42, ErrTransfer},
 	}
 	for _, tt := range tests {

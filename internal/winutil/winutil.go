@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Package winutil isolates the Windows system calls mink-lasso needs — a
-// deny-write file open, network-drive detection, a single-instance mutex,
-// and opening a folder in the file manager — behind a portable API. Every
+// deny-write file open, network-drive and hidden-folder detection, a
+// single-instance mutex, and opening a folder in the file manager — behind a
+// portable API. Every
 // exported function also has a working non-Windows implementation, so the
 // rest of the application never imports golang.org/x/sys/windows directly
 // and every other package builds and tests on macOS and Linux.

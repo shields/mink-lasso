@@ -21,24 +21,24 @@ import (
 
 // SerialString formats a controller serial number the way it is written
 // on the Masso's own screen and in Masso Link (for example, 12345 ->
-// "G3-12345": decimal, no zero padding). The u16-to-"G3-nnnnn" mapping is
+// "G3-12345": decimal, no zero padding). The u32-to-"G3-nnnnn" mapping is
 // a documented assumption, not yet confirmed against real hardware;
 // internal/integration checks it against a live controller.
-func SerialString(serial uint16) string {
-	return "G3-" + strconv.Itoa(int(serial))
+func SerialString(serial uint32) string {
+	return "G3-" + strconv.FormatUint(uint64(serial), 10)
 }
 
 // ParseSerial parses a controller serial number written as "G3-12345",
 // "g3-12345", or bare "12345". It returns ErrBadSerial for any other form,
-// including a value that does not fit in uint16.
-func ParseSerial(s string) (uint16, error) {
+// including a value that does not fit in uint32.
+func ParseSerial(s string) (uint32, error) {
 	digits := s
 	if len(s) >= 3 && (s[:3] == "G3-" || s[:3] == "g3-") {
 		digits = s[3:]
 	}
-	n, err := strconv.ParseUint(digits, 10, 16)
+	n, err := strconv.ParseUint(digits, 10, 32)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %q", ErrBadSerial, s)
 	}
-	return uint16(n), nil
+	return uint32(n), nil
 }

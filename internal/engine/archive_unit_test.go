@@ -147,6 +147,8 @@ func TestArchiveSentCtxCanceledDuringRetryReportsSentUnfiled(t *testing.T) {
 		Clock:             clock.Real{},
 		MoveRetries:       3,
 		MoveRetryInterval: time.Hour, // never actually waited: ctx is canceled first
+		MkdirAll:          func(string, os.FileMode) error { return nil },
+		Stat:              func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
 		Rename:            func(string, string) error { return renameErr },
 	})
 	it := &item{name: "A.NC", path: "/watch/A.NC", state: Sending}
@@ -154,12 +156,15 @@ func TestArchiveSentCtxCanceledDuringRetryReportsSentUnfiled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	e.scheduler.archiveSent(ctx, it)
+	e.scheduler.archiveSent(ctx, it, sendSource{root: "/watch", base: "A.NC", path: "/watch/A.NC"})
 
 	e.scheduler.mu.Lock()
 	defer e.scheduler.mu.Unlock()
 	if it.state != SentUnfiled {
 		t.Errorf("state = %v, want SentUnfiled after a canceled retry wait", it.state)
+	}
+	if !strings.Contains(it.message, renameErr.Error()) {
+		t.Errorf("message = %q, want it to report the rename failure", it.message)
 	}
 }
 

@@ -73,6 +73,22 @@ func TestIsRemoteOther(t *testing.T) {
 	}
 }
 
+func TestIsHiddenOther(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	hidden := filepath.Join(dir, ".hidden")
+	if err := os.Mkdir(hidden, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	for _, path := range []string{dir, hidden, filepath.Join(dir, "missing")} {
+		if IsHidden(path) {
+			t.Errorf("IsHidden(%q) = true, want false", path)
+		}
+	}
+}
+
 func TestSingleInstanceOther(t *testing.T) {
 	t.Parallel()
 

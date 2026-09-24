@@ -52,6 +52,10 @@ var (
 	// ErrBadFileName indicates a file name that fails ValidateFileName.
 	ErrBadFileName = errors.New("masso: invalid file name")
 
+	// ErrBadUploadDir indicates an upload directory that fails
+	// ValidateUploadDir.
+	ErrBadUploadDir = errors.New("masso: invalid upload directory")
+
 	// ErrBadSerial indicates a string ParseSerial could not parse as a
 	// controller serial number.
 	ErrBadSerial = errors.New("masso: invalid serial number")

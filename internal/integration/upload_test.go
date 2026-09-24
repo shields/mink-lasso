@@ -23,6 +23,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"msrl.dev/mink-lasso/internal/masso"
 )
 
 // mltest1Data is a short comment file that fits in a single upload chunk.
@@ -47,6 +49,39 @@ func mltest2Data() []byte {
 	return b.Bytes()
 }
 
+// mltest4Data is a short comment file for the subfolder upload.
+func mltest4Data() []byte {
+	return []byte("(mink-lasso integration test 4, uploaded into the MLTEST folder)\nM30\n")
+}
+
+// uploadOne uploads data as name in dir (backslash-separated, "" for the
+// drive root), failing the test with hint appended to any upload error.
+func uploadOne(t *testing.T, conn connection, dir, name string, data []byte, hint string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	path := masso.JoinUploadPath(dir, name)
+
+	var sent, total int64
+
+	err := conn.client.Upload(ctx, dir, name, bytes.NewReader(data), int64(len(data)), func(s, tot int64) {
+		sent, total = s, tot
+	})
+	if err != nil {
+		t.Fatalf("Upload(%s): %v (progress before failure: %d/%d bytes)%s", path, err, sent, total, hint)
+	}
+
+	if total != int64(len(data)) {
+		t.Errorf("Upload(%s): final progress total=%d, want %d", path, total, len(data))
+	}
+
+	if sent != total {
+		t.Errorf("Upload(%s): final progress sent=%d, want %d (== total)", path, sent, total)
+	}
+}
+
 // testUpload uploads MLTEST1.NC, then MLTEST2.NC, then MLTEST1.NC again to
 // confirm overwriting, skipping unless the machine is idle or
 // MINK_LASSO_ALLOW_RUNNING=1.
@@ -57,31 +92,23 @@ func testUpload(t *testing.T, addr *net.UDPAddr) {
 
 	conn := connect(t, addr)
 
-	upload := func(name string, data []byte) {
-		t.Helper()
+	uploadOne(t, conn, "", "MLTEST1.NC", mltest1Data(), "")
+	uploadOne(t, conn, "", "MLTEST2.NC", mltest2Data(), "")
+	uploadOne(t, conn, "", "MLTEST1.NC", mltest1Data(), "") // overwrite
+}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+// subfolderHint explains the likeliest cause of a failed subfolder upload.
+const subfolderHint = "; whether the controller creates a missing folder has not been verified " +
+	"(docs/protocol.md §5.1), so create an MLTEST folder at the root of the USB drive and run the test again"
 
-		var sent, total int64
+// testUploadSubfolder uploads MLTEST4.NC into an MLTEST folder on the USB
+// drive, skipping unless the machine is idle or MINK_LASSO_ALLOW_RUNNING=1.
+func testUploadSubfolder(t *testing.T, addr *net.UDPAddr) {
+	t.Helper()
 
-		err := conn.client.Upload(ctx, name, bytes.NewReader(data), int64(len(data)), func(s, tot int64) {
-			sent, total = s, tot
-		})
-		if err != nil {
-			t.Fatalf("Upload(%s): %v (progress before failure: %d/%d bytes)", name, err, sent, total)
-		}
+	requireIdleOrAllowed(t, addr)
 
-		if total != int64(len(data)) {
-			t.Errorf("Upload(%s): final progress total=%d, want %d", name, total, len(data))
-		}
+	conn := connect(t, addr)
 
-		if sent != total {
-			t.Errorf("Upload(%s): final progress sent=%d, want %d (== total)", name, sent, total)
-		}
-	}
-
-	upload("MLTEST1.NC", mltest1Data())
-	upload("MLTEST2.NC", mltest2Data())
-	upload("MLTEST1.NC", mltest1Data()) // overwrite
+	uploadOne(t, conn, "MLTEST", "MLTEST4.NC", mltest4Data(), subfolderHint)
 }

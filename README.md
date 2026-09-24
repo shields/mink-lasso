@@ -45,7 +45,7 @@ broadcast, connects, and starts watching the folder.
 ```mermaid
 stateDiagram-v2
     [*] --> Pending: file settles in the watched folder
-    [*] --> Rejected: file name invalid
+    [*] --> Rejected: file or folder name invalid
     Pending --> Waiting: machine busy or controller unreachable
     Waiting --> Pending
     Pending --> Sending: nothing blocking it
@@ -73,6 +73,19 @@ controller, just as Masso Link does. In the `sent` folder nothing is ever
 overwritten: an older copy is renamed with a timestamp first, so the folder is a
 complete history of what went to the machine.
 
+Subfolders of the watched folder are watched too: a file in a subfolder is sent
+into the matching folder on the controller's USB drive—the way Masso Link 2.15
+preserves a dropped folder's structure—and archived into `sent` under that same
+subfolder. Folder names must be printable ASCII too, though not limited to
+fifteen characters, and the subfolder path as a whole at most 255; a file in a
+folder that breaks these rules is rejected until the folder is renamed. Changes
+made inside a subfolder are noticed by the periodic rescan rather than sped up
+by a filesystem notification, which only ever covers the watched folder itself.
+Whether the controller creates a folder on the USB drive that does not yet exist
+has not been verified against real hardware—the protocol has no create-directory
+request—so if a subfolder upload fails, create the folder on the USB drive by
+hand first.
+
 ### Machining
 
 By default nothing is uploaded while the machine is running a program or waiting
@@ -97,9 +110,9 @@ its controller (`address`) so it can connect without broadcasting.
 
 ### Firewall
 
-Replies arrive on a UDP port between 11000 and 11050, the same range Masso Link
-uses. Windows Firewall lets replies to a request through without a rule, so a
-normal desktop installation needs nothing. When the app runs as a service or
+Replies arrive on a UDP port between 11000 and 11050, within the range Masso
+Link uses. Windows Firewall lets replies to a request through without a rule, so
+a normal desktop installation needs nothing. When the app runs as a service or
 unattended, add a rule (as administrator):
 
 ```text
@@ -174,11 +187,12 @@ the app headless against it; drop a file into `/tmp/w` and watch it move to
 
 `internal/integration` runs against a real controller: discovery, status, the
 tool table, uploads (`MLTEST1.NC` and `MLTEST2.NC`, then `MLTEST1.NC` again to
-confirm overwriting), and an end-to-end test that starts the built exe headless
-and drops `MLTEST3.NC` into a watched folder. The suite skips itself unless
-`MINK_LASSO_SERIAL` is set, and skips the upload and end-to-end tests while the
-machine is running unless `MINK_LASSO_ALLOW_RUNNING=1`. Delete the `MLTEST*.NC`
-files from the USB drive whenever convenient.
+confirm overwriting, then `MLTEST4.NC` into an `MLTEST` folder), and an
+end-to-end test that starts the built exe headless and drops `MLTEST3.NC` into a
+watched folder. The suite skips itself unless `MINK_LASSO_SERIAL` is set, and
+skips the upload and end-to-end tests while the machine is running unless
+`MINK_LASSO_ALLOW_RUNNING=1`. Delete the `MLTEST*.NC` files and the `MLTEST`
+folder from the USB drive whenever convenient.
 
 Run it by hand from Git Bash on a Windows PC on the controller's LAN, with Go
 and GNU make installed (`choco install make` or

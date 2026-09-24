@@ -92,11 +92,17 @@ func TestResolveOptionsDefaults(t *testing.T) {
 	if got.ReplyTimeout != time.Second {
 		t.Errorf("ReplyTimeout = %v, want 1s", got.ReplyTimeout)
 	}
-	if got.Retransmit != 100*time.Millisecond {
-		t.Errorf("Retransmit = %v, want 100ms", got.Retransmit)
+	if got.StartRetransmit != time.Second {
+		t.Errorf("StartRetransmit = %v, want 1s", got.StartRetransmit)
+	}
+	if got.StartTimeout != 5*time.Second {
+		t.Errorf("StartTimeout = %v, want 5s", got.StartTimeout)
 	}
 	if got.StallTimeout != 15*time.Second {
 		t.Errorf("StallTimeout = %v, want 15s", got.StallTimeout)
+	}
+	if got.AbortInterval != 20*time.Millisecond {
+		t.Errorf("AbortInterval = %v, want 20ms", got.AbortInterval)
 	}
 }
 
@@ -113,7 +119,8 @@ func TestResolveOptionsPreservesOverrides(t *testing.T) {
 		Logger: logger, Clock: cl, PortMin: 1, PortMax: 2,
 		ListenPacket: lp, Interfaces: ifs, InterfaceAddrs: addrs,
 		KeepaliveInterval: 2 * time.Second, LostAfter: 3 * time.Second,
-		ReplyTimeout: 4 * time.Second, Retransmit: 5 * time.Second, StallTimeout: 6 * time.Second,
+		ReplyTimeout: 4 * time.Second, StartRetransmit: 5 * time.Second, StartTimeout: 7 * time.Second,
+		StallTimeout: 6 * time.Second, AbortInterval: 8 * time.Second,
 	})
 
 	if got.Logger != logger {
@@ -143,11 +150,17 @@ func TestResolveOptionsPreservesOverrides(t *testing.T) {
 	if got.ReplyTimeout != 4*time.Second {
 		t.Errorf("ReplyTimeout = %v, want 4s", got.ReplyTimeout)
 	}
-	if got.Retransmit != 5*time.Second {
-		t.Errorf("Retransmit = %v, want 5s", got.Retransmit)
+	if got.StartRetransmit != 5*time.Second {
+		t.Errorf("StartRetransmit = %v, want 5s", got.StartRetransmit)
+	}
+	if got.StartTimeout != 7*time.Second {
+		t.Errorf("StartTimeout = %v, want 7s", got.StartTimeout)
 	}
 	if got.StallTimeout != 6*time.Second {
 		t.Errorf("StallTimeout = %v, want 6s", got.StallTimeout)
+	}
+	if got.AbortInterval != 8*time.Second {
+		t.Errorf("AbortInterval = %v, want 8s", got.AbortInterval)
 	}
 }
 
@@ -397,7 +410,7 @@ func TestToolsRequestErrorPropagates(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	c.setRemote(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1})
+	c.setConnection(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}, Identity{})
 
 	_, err = c.Tools(t.Context())
 	if !errors.Is(err, ErrSend) {
@@ -457,7 +470,7 @@ func TestReaderDropsWithNoWaiter(t *testing.T) {
 
 	// A subsequent, properly waited-for exchange must still work, proving
 	// the unwaited packet above did not corrupt any state.
-	ch, cancel := c.expect(TypeTool, anyReply)
+	ch, cancel := c.expect(TypeTool, nil, anyReply)
 	defer cancel()
 	mustSend(t, fake, caddr, ToolRecord{Index: 2, Name: "endmill"}.Encode())
 	in := waitFor(t, ch)
@@ -477,7 +490,7 @@ func TestReaderDropsWhenMatcherRejects(t *testing.T) {
 		tr, ok := r.(ToolRecord)
 		return ok && tr.Index == 1
 	}
-	ch, cancel := c.expect(TypeTool, match)
+	ch, cancel := c.expect(TypeTool, nil, match)
 	defer cancel()
 
 	mustSend(t, fake, caddr, ToolRecord{Index: 2, Name: "rejected"}.Encode())
@@ -508,7 +521,7 @@ func TestReaderDropsWhenWaiterBufferFull(t *testing.T) {
 	fake := rawConn(t)
 	caddr := clientAddr(c)
 
-	ch, cancel := c.expect(TypeTool, anyReply)
+	ch, cancel := c.expect(TypeTool, nil, anyReply)
 	defer cancel()
 
 	// Flood without draining until the buffer actually overflows — sending
@@ -556,7 +569,7 @@ func TestToolsErrNotConnected(t *testing.T) {
 func TestUploadErrNotConnected(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t, clock.Real{})
-	err := c.Upload(t.Context(), "A.NC", bytes.NewReader(nil), 0, nil)
+	err := c.Upload(t.Context(), "", "A.NC", bytes.NewReader(nil), 0, nil)
 	if !errors.Is(err, ErrNotConnected) {
 		t.Fatalf("Upload = %v, want ErrNotConnected", err)
 	}
@@ -565,7 +578,7 @@ func TestUploadErrNotConnected(t *testing.T) {
 func TestUploadOversize(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t, clock.Real{})
-	err := c.Upload(t.Context(), "BIG.NC", bytes.NewReader(nil), int64(math.MaxUint32)+1, nil)
+	err := c.Upload(t.Context(), "", "BIG.NC", bytes.NewReader(nil), int64(math.MaxUint32)+1, nil)
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("Upload = %v, want ErrFileTooLarge", err)
 	}
@@ -574,7 +587,7 @@ func TestUploadOversize(t *testing.T) {
 func TestUploadNegativeSize(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t, clock.Real{})
-	err := c.Upload(t.Context(), "NEG.NC", bytes.NewReader(nil), -1, nil)
+	err := c.Upload(t.Context(), "", "NEG.NC", bytes.NewReader(nil), -1, nil)
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("Upload = %v, want ErrFileTooLarge", err)
 	}
@@ -586,7 +599,7 @@ func TestRequestCtxAlreadyCanceled(t *testing.T) {
 	cancel()
 	c := newTestClient(t, clock.Real{})
 	dst := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
-	_, err := c.request(ctx, TypeConfig, anyReply, []byte("pkt"), dst, 5*time.Second, 1)
+	_, err := c.request(ctx, TypeConfig, nil, anyReply, []byte("pkt"), dst, 5*time.Second, 1)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("request = %v, want context.Canceled", err)
 	}
@@ -615,72 +628,5 @@ func TestRequestSendFailure(t *testing.T) {
 	_, err = c.DiscoverAt(ctx, dst, time.Second)
 	if !errors.Is(err, ErrSend) {
 		t.Fatalf("DiscoverAt = %v, want ErrSend", err)
-	}
-}
-
-func TestSendUntilStallInitialSendFailure(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	writeErr := errors.New("write boom")
-	realConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	fc := &fakeConn{PacketConn: realConn, writeTo: func([]byte, net.Addr) (int, error) { return 0, writeErr }}
-	port := freePort(t)
-	c, err := NewClient(Options{
-		Clock: clock.Real{}, PortMin: port, PortMax: port,
-		ListenPacket: func(string, string) (net.PacketConn, error) { return fc, nil },
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	dst := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
-	_, err = c.sendUntilStall(ctx, TypeUploadStart, anyReply, []byte("pkt"), dst)
-	if !errors.Is(err, ErrSend) {
-		t.Fatalf("sendUntilStall = %v, want ErrSend", err)
-	}
-}
-
-func TestSendUntilStallRetransmitSendFailure(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	writeErr := errors.New("write boom")
-	realConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	var calls int
-	fc := &fakeConn{PacketConn: realConn, writeTo: func(p []byte, _ net.Addr) (int, error) {
-		calls++
-		if calls == 1 {
-			return len(p), nil
-		}
-		return 0, writeErr
-	}}
-	port := freePort(t)
-	clk := clock.NewFake(time.Unix(0, 0))
-	c, err := NewClient(Options{
-		Clock: clk, PortMin: port, PortMax: port,
-		ListenPacket: func(string, string) (net.PacketConn, error) { return fc, nil },
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	dst := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
-	resultCh := make(chan error, 1)
-	go func() {
-		_, err := c.sendUntilStall(ctx, TypeUploadStart, anyReply, []byte("pkt"), dst)
-		resultCh <- err
-	}()
-	clk.BlockUntil(2)
-	clk.Advance(c.retransmit)
-
-	if err := waitFor(t, resultCh); !errors.Is(err, ErrSend) {
-		t.Fatalf("sendUntilStall = %v, want ErrSend", err)
 	}
 }

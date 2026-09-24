@@ -26,9 +26,9 @@ import (
 
 // testDiscover checks the identity from a unicast connect to addr — the
 // address the suite's one broadcast discovery already found for
-// MINK_LASSO_SERIAL — and empirically checks the G3-nnnnn <-> uint16 serial
+// MINK_LASSO_SERIAL — and empirically checks the G3-nnnnn <-> uint32 serial
 // mapping documented on masso.SerialString against a live controller.
-func testDiscover(t *testing.T, addr *net.UDPAddr, serial uint16) {
+func testDiscover(t *testing.T, addr *net.UDPAddr, serial uint32) {
 	t.Helper()
 
 	conn := connect(t, addr)
@@ -38,14 +38,15 @@ func testDiscover(t *testing.T, addr *net.UDPAddr, serial uint16) {
 		masso.SerialString(conn.identity.Serial), conn.identity.Serial, conn.addr, conn.identity.Version,
 	)
 
-	if conn.identity.Serial != conn.cfg.Serial {
-		t.Errorf("discovery identity serial %d != config-reply serial %d from Connect", conn.identity.Serial, conn.cfg.Serial)
+	if low := uint16(conn.identity.Serial & 0xFFFF); low != conn.cfg.Serial {
+		t.Errorf("discovery identity serial %d (low 16 bits %d) != config-reply serial %d from Connect",
+			conn.identity.Serial, low, conn.cfg.Serial)
 	}
 
-	if conn.cfg.Serial != serial {
+	if conn.identity.Serial != serial {
 		t.Errorf(
 			"serial mismatch: controller reports %s (%d), MINK_LASSO_SERIAL=%q parsed as %s (%d)",
-			masso.SerialString(conn.cfg.Serial), conn.cfg.Serial,
+			masso.SerialString(conn.identity.Serial), conn.identity.Serial,
 			os.Getenv("MINK_LASSO_SERIAL"), masso.SerialString(serial), serial,
 		)
 	}

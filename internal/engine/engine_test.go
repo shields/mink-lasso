@@ -42,7 +42,7 @@ func (fakeClient) Run(context.Context) error                         { return ni
 func (fakeClient) Status() <-chan masso.Status                       { return nil }
 func (fakeClient) Tools(context.Context) ([]masso.ToolRecord, error) { return nil, nil }
 
-func (fakeClient) Upload(context.Context, string, io.ReaderAt, int64, func(int64, int64)) error {
+func (fakeClient) Upload(context.Context, string, string, io.ReaderAt, int64, func(int64, int64)) error {
 	return nil
 }
 func (fakeClient) Remote() *net.UDPAddr { return nil }
@@ -57,11 +57,11 @@ var errFakeBind = errors.New("fake: bind failed")
 type spammyClient struct {
 	fakeClient
 
-	serial uint16
+	serial uint32
 	status chan masso.Status
 }
 
-func newSpammyClient(serial uint16) *spammyClient {
+func newSpammyClient(serial uint32) *spammyClient {
 	c := &spammyClient{serial: serial, status: make(chan masso.Status)}
 	return c
 }

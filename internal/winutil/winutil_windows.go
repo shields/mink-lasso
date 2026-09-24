@@ -77,6 +77,24 @@ func IsRemote(path string) bool {
 	return windows.GetDriveType(&rootUTF16[0]) == windows.DRIVE_REMOTE
 }
 
+// IsHidden reports whether path has the Hidden attribute, as $RECYCLE.BIN
+// and System Volume Information at a drive's root do. A folder with only the
+// System attribute (as "attrib +s" leaves one) is not hidden: Explorer still
+// shows it. It reports false if the attributes cannot be read.
+func IsHidden(path string) bool {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+
+	attrs, err := windows.GetFileAttributes(p)
+	if err != nil {
+		return false
+	}
+
+	return attrs&windows.FILE_ATTRIBUTE_HIDDEN != 0
+}
+
 // SingleInstance claims a machine-local, named mutex so that only one
 // instance of the application runs at a time. On success it returns a
 // release function that must be called — typically via defer — to give up

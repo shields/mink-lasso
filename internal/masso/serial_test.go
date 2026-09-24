@@ -23,12 +23,14 @@ func TestSerialString(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		serial uint16
+		serial uint32
 		want   string
 	}{
 		{12345, "G3-12345"},
 		{0, "G3-0"},
 		{65535, "G3-65535"},
+		{65536, "G3-65536"},
+		{4294967295, "G3-4294967295"},
 		{1, "G3-1"},
 	}
 	for _, tt := range tests {
@@ -43,13 +45,15 @@ func TestParseSerialValid(t *testing.T) {
 
 	tests := []struct {
 		s    string
-		want uint16
+		want uint32
 	}{
 		{"G3-12345", 12345},
 		{"g3-12345", 12345},
 		{"12345", 12345},
 		{"G3-0", 0},
 		{"G3-65535", 65535},
+		{"G3-70000", 70000},
+		{"4294967295", 4294967295},
 	}
 	for _, tt := range tests {
 		got, err := ParseSerial(tt.s)
@@ -72,10 +76,10 @@ func TestParseSerialInvalid(t *testing.T) {
 		"g3-",
 		"G3-abc",
 		"abc",
-		"G3-70000",  // out of uint16 range
-		"70000",     // out of uint16 range
-		"G3--12345", // malformed
-		"G3",        // too short for the prefix check
+		"G3-4294967296", // out of uint32 range
+		"4294967296",    // out of uint32 range
+		"G3--12345",     // malformed
+		"G3",            // too short for the prefix check
 	}
 	for _, s := range tests {
 		if _, err := ParseSerial(s); !errors.Is(err, ErrBadSerial) {
@@ -87,7 +91,7 @@ func TestParseSerialInvalid(t *testing.T) {
 func TestSerialRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	for _, serial := range []uint16{0, 1, 12345, 65535} {
+	for _, serial := range []uint32{0, 1, 12345, 65535, 65536, 4294967295} {
 		got, err := ParseSerial(SerialString(serial))
 		if err != nil {
 			t.Fatalf("ParseSerial(SerialString(%d)): unexpected error: %v", serial, err)

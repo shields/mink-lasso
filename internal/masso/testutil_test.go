@@ -15,8 +15,9 @@
 // This file's helpers back the internal (package masso) test files only.
 // The sim-dependent tests live in an external package masso_test, because
 // internal/masso/sim imports internal/masso: a same-package test file
-// cannot also import sim without creating an import cycle. Its parallel
-// helpers are duplicated in sim_testutil_test.go for that package.
+// cannot also import sim without creating an import cycle. Some of its
+// helpers are duplicated in sim_testutil_test.go for that package, and
+// export_test.go makes the others available to it.
 
 package masso
 
@@ -24,6 +25,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,16 +33,12 @@ import (
 	"msrl.dev/mink-lasso/internal/clock"
 )
 
-// nextTestPort hands out a distinct port on every call. Earlier this asked
-// the OS for a free port and released it for the caller to rebind, but
-// under this package's heavy test parallelism two calls could both be
-// handed the same just-released port before either rebound it, so a test's
-// NewClient would intermittently fail with "address already in use". A
-// monotonic counter, seeded well clear of the package's own default
-// 11000-11050 range, gives every test a port none of the others will ever
-// try. sim_testutil_test.go keeps a separate counter (package masso_test
-// compiles into the same test binary) seeded far enough away that the two
-// series cannot collide with each other either.
+// nextTestPort hands out a distinct port on every call, to both this
+// package's tests and masso_test's (through FreePortForTest), which share
+// one test binary. Don't replace it with an OS-assigned free port: released
+// for the caller to rebind, one can be handed to two parallel tests before
+// either rebinds it. The series starts well clear of the package's default
+// 11000-11050 range and below Linux's ephemeral range.
 var nextTestPort = func() *atomic.Int32 {
 	var p atomic.Int32
 	p.Store(30000)
@@ -48,9 +46,17 @@ var nextTestPort = func() *atomic.Int32 {
 }()
 
 // freePort returns a port number private to this call, for a test to give
-// NewClient as a single-port [PortMin, PortMax] range.
-func freePort(*testing.T) int {
-	return int(nextTestPort.Add(1))
+// NewClient as a single-port [PortMin, PortMax] range. It skips any port
+// that something outside this test binary already holds.
+func freePort(t *testing.T) int {
+	t.Helper()
+	for range maxPortProbes {
+		if port := int(nextTestPort.Add(1)); canBind(t, port) {
+			return port
+		}
+	}
+	t.Fatalf("no bindable port in %d tries", maxPortProbes)
+	return 0
 }
 
 // unansweredTargets returns an Options.DiscoveryTargets naming a private
@@ -60,6 +66,20 @@ func unansweredTargets(t *testing.T) []*net.UDPAddr {
 	t.Helper()
 	return []*net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: freePort(t)}}
 }
+
+func canBind(t *testing.T, port int) bool {
+	t.Helper()
+	pc, err := net.ListenPacket("udp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	if err := pc.Close(); err != nil {
+		t.Fatalf("closing probe socket: %v", err)
+	}
+	return true
+}
+
+const maxPortProbes = 100
 
 // newTestClient builds a Client on its own private port (via freePort) using
 // cl for all timing, and registers its Close for test cleanup. Its Discover

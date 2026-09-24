@@ -73,7 +73,7 @@ func (f *fakeEngine) Run(ctx context.Context) error {
 }
 
 func (f *fakeEngine) Events() <-chan engine.Event { return f.events }
-func (*fakeEngine) SetSerial(uint16)              {}
+func (*fakeEngine) SetSerial(uint32)              {}
 func (*fakeEngine) SetWatchDir(string) error      { return nil }
 func (*fakeEngine) SetUploadWhileMachining(bool)  {}
 func (*fakeEngine) RefreshTools()                 {}
