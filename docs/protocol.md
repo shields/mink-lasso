@@ -66,6 +66,14 @@ subsequent reply and status broadcast to it.
   bytes, and bounds-checks every field it reads against the datagram's actual
   length; v2.12/v2.14 read fixed offsets and, on an unexpectedly short reply,
   see whatever bytes a previous, longer packet left in the shared buffer.
+- This filter applies to every reply type alike, identity and config replies
+  included, not only to status and upload ACKs — Masso Link checks the source IP
+  once, for whatever datagram arrives on its single receive socket, before it
+  looks at the datagram's type or contents at all. It only takes effect once
+  connected to a specific controller, though: during the discovery scan of §7
+  (and the separate connect-by-serial resolution it can run first) there is no
+  connected address yet to filter against, so identity replies there are taken
+  from whichever address they arrive from and matched by content instead.
 
 ---
 
@@ -310,7 +318,14 @@ directly inside a dropped folder named `JOBS`, or `JOBS\SUB` one level deeper:
 
 No packet exists for creating a directory on the controller. Whether the
 controller creates missing directories itself, or requires them to already
-exist, is unverified.
+exist, is unverified — and so is which result, if any, a start ACK or the first
+chunk ACK carries when the directory named in the path field does not exist;
+nothing in the client distinguishes that case from any other transfer error.
+Which bytes a directory name may contain, and whether one path component has a
+length limit narrower than the 255-byte path field as a whole, are likewise
+controller-side questions the client binaries do not resolve: Masso Link imposes
+no per-component check of its own, only the overall path/name limits this
+section already describes.
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
 
@@ -325,6 +340,14 @@ The `0xF7` case only arises for a client that retransmits the start packet
 (v2.15; §5.3): a `0xF7` reply to a resent request is read as "already started",
 the first attempt having succeeded. v2.12 never resends the start packet and
 treats `0xF7` like any other error.
+
+Whether real firmware actually answers a resent start request with `0xF7` — and,
+if so, whether it then expects the transfer to begin at chunk 0 rather than
+wherever the first attempt left off — is unverified against real hardware; the
+client binaries only show how Masso Link interprets that byte on the wire, not
+what a controller sends it under. Likewise unverified: whether a controller that
+answers a start request with an error result has already begun the upload, and
+stores any chunks the client goes on to send regardless.
 
 ### 5.2 Data chunk — `0x0B`
 
@@ -345,6 +368,12 @@ number of chunks the controller has accepted so far.
 | `0x01` | **Unable to write file to USB**                               |
 | `0x02` | **Canceled by the user on the Masso** (payload spells `USER`) |
 
+When a chunk ACK's result is an error (`0x01` or `0x02`), Masso Link still
+decodes its accepted-chunk count but abandons the transfer immediately afterward
+without folding that count into the running total it had been tracking (v2.15) —
+an error result's accepted count has no effect on the progress already reported
+and is not used for anything beyond ending the transfer.
+
 ### 5.3 Sequence and timing
 
 ```
@@ -364,6 +393,12 @@ client                          controller
   that many bytes, so any padding in the last chunk is discarded.
 - The chunk ACK's accepted-chunk count (§5.2) only ever moves the client's
   "accepted so far" pointer forward, clamped to the number of chunks sent.
+- Immediately after a successful start ACK, and before sending chunk 0, v2.15
+  discards any chunk ACK its receiver had already queued but not yet consumed —
+  a guard against a chunk ACK delayed from a previous transfer being read as
+  belonging to this one. Only chunk ACKs that arrive after that point are looked
+  at. This was verified in the v2.15 binary only; whether v2.12/v2.14 do the
+  same was not checked.
 
 **v2.12** sends the start packet once and busy-waits (no sleep between polls) up
 to 5 s for its ACK, giving up with no reply. It then sends one chunk at a time,
@@ -375,17 +410,33 @@ chunk after a fixed ~100 ms with no reply, and aborting the whole transfer —
 
 - it resends the start packet roughly once per second (via a real sleep between
   checks, not a busy spin) until it gets an ACK or 5 s pass, whichever comes
-  first — see the `0xF7` case in §5.1;
+  first — see the `0xF7` case in §5.1. Each cycle sends once, waits for a reply,
+  then checks the 5 s budget; it does not track individual one-second slots. If
+  the process falls behind schedule — suspended for several seconds between one
+  check and the next, say — it does not send a burst of catch-up resends: it
+  sends one resend and re-checks the budget exactly as it would have on time, so
+  a long-enough gap can exhaust the whole 5 s budget after a single resend;
 - it keeps up to **2 chunks in flight** rather than 1. The window opens from 1
   to 2 after 3 consecutive chunks are acknowledged with no retransmission, and
-  drops back to 1 the moment any chunk needs a retransmission;
+  drops back to 1 the moment any chunk needs a retransmission. A chunk ACK that
+  does not advance the accepted count — a duplicate, or one whose count is no
+  higher than what is already recorded — does not count toward, or reset, that
+  streak; it has no effect on the window at all;
 - instead of a fixed ~100 ms retransmit interval, it tracks a smoothed
   round-trip estimate, seeded at 60 ms and updated on every acknowledgment of a
   chunk that was never itself retransmitted: `SRTT := (3 × SRTT + sample) / 4`.
-  The retransmit timeout is `2 × SRTT`, clamped to 40–250 ms; whenever the
-  oldest unacknowledged chunk has been outstanding longer than that, every chunk
-  currently in flight is resent;
-- it still gives up after 15 s with no ACK activity of any kind.
+  When one chunk ACK's accepted count advances past several chunks at once, each
+  of those chunks takes its own sample, against its own send time, skipping only
+  the ones that were themselves retransmitted — not one sample for the whole
+  ACK. The retransmit timeout is `2 × SRTT`, clamped to 40–250 ms; whenever the
+  oldest unacknowledged chunk has been outstanding strictly longer than that
+  (not merely as long as it), every chunk currently in flight is resent;
+- it still gives up after 15 s with no ACK activity of any kind. Any chunk ACK
+  restarts that 15 s window, including one that does not advance the accepted
+  count or that carries an error result — the window resets as soon as a reply
+  is seen, before its contents are examined at all. Nothing about reading the
+  next chunk from the file resets it, so time spent on a slow local read counts
+  against the same 15 s.
 
 **Compatible clients.** mink-lasso implements the v2.15 behavior above: a
 variable-length start packet (§5.1), a zeroed tool-query trailer (§3.4), the
@@ -418,14 +469,27 @@ v2.15 sends this 10-byte, payload-free packet three times, 20 ms apart, with no
 reply expected; no version's receiver ever tests an incoming packet's type
 against `0x0C`, and v2.12/v2.14 never send it.
 
-It is sent when the start request got an ACK (the upload actually began) but the
-transfer did **not** end cleanly — a controller error result, a cancel on the
-Masso, a local cancel, or the 15 s give-up above. A transfer that completes
-cleanly never sends it.
+It is sent whenever the start request drew _any_ reply — a clean success, an
+error result such as `0xE9`, the post-retry `0xF7`, or anything else — and the
+transfer did **not** go on to end cleanly: a start ACK carrying an error result,
+an error result on a chunk ACK, a cancel on the Masso, a local cancel, the 15 s
+give-up above, or a chunk that could not be read from disk partway through the
+transfer. The start ACK's own content does not gate this: Masso Link only checks
+whether _some_ start-ACK reply arrived, not whether it reported success, so a
+refused start (§5.1) is followed by the same notification as a chunk-phase
+failure. A transfer that never drew a start-ACK reply at all (the 5 s give-up in
+§5.1) does not send it, since by that definition the start itself was never
+acknowledged. A transfer that completes cleanly never sends it either. Whether a
+failure on the socket send itself — as opposed to a failed local file read — is
+followed by the same notification was not pinned down in the client binaries.
 
 Its effect on the controller is unknown; the most plausible reading, since it
 names no file or path, is an abort/cleanup notification. mink-lasso sends it
-under the same condition. Whether the controller needs it has not been tested.
+under the same condition. Whether the controller needs it has not been tested,
+and neither has what the controller does with the partial file it was writing —
+keep it, delete it, or something else — or what accepted count, if any, it
+reports for chunks sent to it after this notification; these are controller-side
+questions the client binaries cannot settle.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 
@@ -506,7 +570,14 @@ serial and then addresses that reply's source IP directly, is equivalent.
 
 Masso Link resets a countdown to a full budget every time any datagram from the
 controller passes the CRC check (§2), regardless of packet type — not only on a
-status or identity reply.
+status or identity reply. Because the source-IP filter of §1 discards a datagram
+from any other address before the CRC check runs at all, such a datagram never
+reaches this reset — liveness can only be extended by the controller Masso Link
+is connected to. Nothing about the check ties a datagram's length to its type,
+either: a datagram whose length does not match what its type would normally
+carry still resets the countdown, as long as it passes the CRC check and (v2.15)
+satisfies the 5–1501 byte bounds of §1; nothing in the reset path re-validates a
+datagram against the shape one of its type is supposed to have.
 
 - **v2.12/v2.14**: the budget is **10 s**. On expiry it runs a single,
   disruptive path: it hides the status controls, tears the socket down and
