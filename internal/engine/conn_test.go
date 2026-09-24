@@ -99,14 +99,15 @@ func newConnTestSim(t *testing.T, serial uint32) *sim.Controller {
 // retry. LostAfter decides what the engine does when it expires, so it is
 // long enough that load cannot trip it in a test that expects to stay
 // connected; a test that wants a Lost shortens it itself.
-func connTestOptions(serial uint32) Options {
+func connTestOptions(t *testing.T, serial uint32) Options {
+	t.Helper()
 	return Options{
 		Config: config.Config{Serial: masso.SerialString(serial)},
 		ClientOptions: masso.Options{
 			ReplyTimeout:      20 * time.Millisecond,
 			KeepaliveInterval: 20 * time.Millisecond,
 			LostAfter:         2 * time.Second,
-			DiscoveryTargets:  unansweredDiscoveryTargets(),
+			DiscoveryTargets:  unansweredDiscoveryTargets(t),
 		},
 		IdleHold:          time.Millisecond,
 		UnicastFirst:      300 * time.Millisecond,
@@ -201,9 +202,9 @@ func runEngine(t *testing.T, e *Engine) (events <-chan Event, stop func()) {
 func TestConnUnicastFirstZeroBroadcasts(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 111)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(111)
+	opts := connTestOptions(t, 111)
 	opts.Config.Address = s.Addr().String()
 	var rc *recordingClient
 	realNewClient := newConnTestNewClient(port)
@@ -302,10 +303,10 @@ func assertOnlyConnectedTo(t *testing.T, rc *recordingClient, want *net.UDPAddr)
 func TestConnBroadcastFindsBySerialIgnoringWrongSerial(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 222)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 	realNewClient := newConnTestNewClient(port)
 
-	opts := connTestOptions(222)
+	opts := connTestOptions(t, 222)
 	var rc *recordingClient
 	opts.NewClient = func(o masso.Options) (Client, error) {
 		c, err := realNewClient(o)
@@ -342,9 +343,9 @@ func TestConnBroadcastFindsBySerialIgnoringWrongSerial(t *testing.T) {
 func TestConnToolsFetchedOnConnectAndRefresh(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 333)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(333)
+	opts := connTestOptions(t, 333)
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
 
@@ -366,9 +367,9 @@ func TestConnToolsFetchedOnConnectAndRefresh(t *testing.T) {
 func TestConnLostThenReconnect(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 444)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(444)
+	opts := connTestOptions(t, 444)
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
 	opts.ClientOptions.LostAfter = 300 * time.Millisecond
@@ -397,9 +398,9 @@ func TestConnLostThenReconnectQueuedFileCompletes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 446)
-	opts := schedTestOptions(446, dir)
+	opts := schedTestOptions(t, 446, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 	opts.ClientOptions.LostAfter = 300 * time.Millisecond
 
 	e, err := New(opts)
@@ -432,9 +433,9 @@ func TestGateEndToEndRunningThenIdleHoldThenSend(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1011)
-	opts := schedTestOptions(1011, dir)
+	opts := schedTestOptions(t, 1011, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 	opts.IdleHold = 80 * time.Millisecond
 	// Set before the engine ever connects, so the very first status it
 	// forwards to the gate already reports Running — avoiding a race with
@@ -466,9 +467,9 @@ func TestGateEndToEndPauseGrace(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1012)
-	opts := schedTestOptions(1012, dir)
+	opts := schedTestOptions(t, 1012, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 	opts.IdleHold = 30 * time.Millisecond
 	opts.Config.PauseGrace = config.Duration(150 * time.Millisecond)
 	// Set before the engine ever connects, so the very first status it
@@ -509,10 +510,10 @@ func TestGateEndToEndUploadWhileMachiningSendsImmediately(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 1013)
-	opts := schedTestOptions(1013, dir)
+	opts := schedTestOptions(t, 1013, dir)
 	opts.Config.Address = s.Addr().String()
 	opts.Config.UploadWhileMachining = true
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -532,9 +533,9 @@ func TestGateEndToEndUploadWhileMachiningSendsImmediately(t *testing.T) {
 func TestConnSetSerialRestarts(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 555)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(1) // wrong serial: the sim will never match
+	opts := connTestOptions(t, 1) // wrong serial: the sim will never match
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
 
@@ -559,9 +560,9 @@ func TestConnSetSerialRestarts(t *testing.T) {
 func TestConnUnconfiguredStart(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 666)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(0)
+	opts := connTestOptions(t, 0)
 	opts.Config.Serial = ""
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
@@ -583,9 +584,9 @@ func TestConnUnconfiguredStart(t *testing.T) {
 func TestConnShutdownStopsCleanly(t *testing.T) {
 	t.Parallel()
 	s := newConnTestSim(t, 777)
-	port := freeAdapterPort()
+	port := freeAdapterPort(t)
 
-	opts := connTestOptions(777)
+	opts := connTestOptions(t, 777)
 	opts.Config.Address = s.Addr().String()
 	opts.NewClient = newConnTestNewClient(port)
 

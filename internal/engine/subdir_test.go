@@ -40,9 +40,9 @@ func TestSchedulerSendsSubfolderFileAndArchivesNested(t *testing.T) {
 	archived := writeFile(t, mkdirAll(t, filepath.Join(dir, "sent", "OLD")), "X.NC", []byte("archived"))
 
 	s := newConnTestSim(t, 2101)
-	opts := schedTestOptions(2101, dir)
+	opts := schedTestOptions(t, 2101, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -89,9 +89,9 @@ func TestSchedulerRejectsSubfolderControllerCannotTake(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 2102)
-	opts := schedTestOptions(2102, dir)
+	opts := schedTestOptions(t, 2102, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -137,9 +137,9 @@ func TestSchedulerManualSendFileFromSubfolderGoesToRoot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 2103)
-	opts := schedTestOptions(2103, "")
+	opts := schedTestOptions(t, 2103, "")
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
@@ -172,9 +172,9 @@ func TestSchedulerManualSendFileInWatchedSubfolderSharesRow(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := newConnTestSim(t, 2104)
-	opts := schedTestOptions(2104, dir)
+	opts := schedTestOptions(t, 2104, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort())
+	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
 
 	e, err := New(opts)
 	if err != nil {
