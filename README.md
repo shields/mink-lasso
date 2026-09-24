@@ -86,6 +86,11 @@ has not been verified against real hardware—the protocol has no create-directo
 request—so if a subfolder upload fails, create the folder on the USB drive by
 hand first.
 
+File → Send file… jumps the queue for one chosen file: a file inside the watched
+folder goes wherever the watcher itself would send it, and any other file goes
+to the root of the USB drive; either way it is left in place rather than moved
+into `sent`.
+
 ### Machining
 
 By default nothing is uploaded while the machine is running a program or waiting

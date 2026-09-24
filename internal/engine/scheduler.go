@@ -44,8 +44,9 @@ const (
 type item struct {
 	// name is the map key and TransferEvent.Name: the file's path
 	// relative to root, the watch folder it came from, or its base name
-	// for a manual send (whose root is ""). dir and base are that path's
-	// OS-native folder ("" for the root) and base name.
+	// for a manual send of a file outside the watched tree (whose root is
+	// ""). dir and base are that path's OS-native folder ("" for the root)
+	// and base name.
 	name    string
 	root    string
 	dir     string
@@ -115,10 +116,18 @@ func (s *scheduler) poke() {
 // enters as Pending; a resend of the name currently Sending is deferred
 // until it finishes; anything else just has its size/mtime refreshed and
 // its failure state cleared — the Changed re-emission the package doc
-// describes.
+// describes. A report of exactly the content a manual send already has —
+// sent, queued, or in flight — leaves that item alone: SendFile can race
+// ahead of the watcher's own first sighting of a file, and re-arming or
+// resending it here would clear the manual flag, or upload it twice, and
+// then archive a file the manual send promised to leave in place.
 func (s *scheduler) ready(root string, f watch.File) {
 	s.mu.Lock()
 	it := s.itemLocked(root, f.Dir, f.Name)
+	if it.manual && it.path == f.Path && it.size == f.Size && it.modTime.Equal(f.ModTime) {
+		s.mu.Unlock()
+		return
+	}
 	it.path = f.Path
 	it.size = f.Size
 	it.modTime = f.ModTime
@@ -215,24 +224,36 @@ func (s *scheduler) retry(name string) {
 	s.poke()
 }
 
-// sendFile queues path as a manual send to the drive root under its base
-// name: never archived, always reported with Manual: true. If name is
-// currently Sending, the map's existing *item (which sendOne/finishSend
-// hold directly) is updated in place and marked for a resend once that
-// transfer finishes — mirroring ready() — rather than replaced outright:
+// sendFile queues path as a manual send, jumping the queue: never archived,
+// always reported with Manual: true. root and dir place it exactly as
+// ready() would for a watcher event — "", "" for the controller's drive
+// root, keyed by base alone, or the watch folder and the relative folder
+// within it, keyed by their join — so a file the watcher already has queued
+// shares that same item instead of getting a second, duplicate entry. If
+// the item is currently Sending — whether the watcher's own send or an
+// earlier manual one — the map's existing *item (which sendOne/finishSend
+// hold directly) is updated in place rather than replaced outright:
 // replacing the map entry would orphan the in-flight item, whose
 // completion would still archive the file out from under this manual
-// request with no visible error.
-func (s *scheduler) sendFile(name, path string, size int64, modTime time.Time) {
+// request with no visible error. It is marked for a resend once that
+// transfer finishes — mirroring ready() — only when size or modTime
+// actually differ from what's already recorded: setting it.manual is
+// enough on its own to make archiveSent skip the archive, so a request to
+// send exactly the bytes already in flight does not also pay for a second,
+// redundant upload of them.
+func (s *scheduler) sendFile(root, dir, base, path string, size int64, modTime time.Time) {
 	s.mu.Lock()
-	it := s.itemLocked("", "", name)
+	it := s.itemLocked(root, dir, base)
+	changed := it.size != size || !it.modTime.Equal(modTime)
 	it.path = path
 	it.size = size
 	it.modTime = modTime
 	it.manual = true
 
 	if it.sending {
-		it.resendAfter = true
+		if changed {
+			it.resendAfter = true
+		}
 	} else {
 		it.state = Pending
 		it.message = msgWaitingToSend
