@@ -364,3 +364,21 @@ func TestSetTerminalLogsFileSent(t *testing.T) {
 		t.Errorf("log output = %q, want it to mention the file being sent", logged)
 	}
 }
+
+// TestSetTerminalSupersededOrphanStaysUnreported confirms setTerminal does
+// not report an outcome for an item a folder switch orphaned and a new
+// watcher has already replaced under the same name: emitting one would
+// overwrite the replacement's live row with this stale item's state (see
+// supersededLocked).
+func TestSetTerminalSupersededOrphanStaysUnreported(t *testing.T) {
+	t.Parallel()
+	e := archiveTestEngine(t, Options{})
+	it := &item{name: "A.NC", path: "/watch/A.NC", state: Sending, orphaned: true}
+	e.scheduler.items["A.NC"] = &item{name: "A.NC", state: Pending} // the replacement now owns this name
+
+	e.scheduler.setTerminal(it, Sent, "File sent")
+
+	if evs := takeQueued(t, e); len(evs) != 0 {
+		t.Errorf("events = %+v, want none (superseded item's outcome must not overwrite the replacement's row)", evs)
+	}
+}
