@@ -836,6 +836,102 @@ func TestClearNonManualPreservesSendingItemThenDropsWithNoResend(t *testing.T) {
 	}
 }
 
+func TestFinishSendResendDuringArchivingRetryRearmsPending(t *testing.T) {
+	t.Parallel()
+	renameErr := errors.New("simulated rename failure")
+	renameCalls := 0
+	var it *item
+	e := archiveTestEngine(t, Options{
+		Clock:             clock.Real{},
+		MoveRetries:       2,
+		MoveRetryInterval: 5 * time.Millisecond,
+		MkdirAll:          func(string, os.FileMode) error { return nil },
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == "/watch/A.NC" {
+				return fakeFileInfo{}, nil // unchanged since it was sent
+			}
+			return nil, os.ErrNotExist // the sent/ destination doesn't exist yet
+		},
+		Rename: func(oldpath, newpath string) error {
+			if oldpath != "/watch/A.NC" {
+				t.Fatalf("unexpected Rename(%q, %q)", oldpath, newpath)
+			}
+			renameCalls++
+			it.resendAfter = true // a Changed arriving mid-retry
+			return renameErr
+		},
+	})
+	it = &item{name: "A.NC", path: "/watch/A.NC", state: Sending, sending: true}
+	e.scheduler.items["A.NC"] = it
+
+	e.scheduler.finishSend(context.Background(), it,
+		sendSource{root: "/watch", base: "A.NC", path: "/watch/A.NC"}, nil, "")
+
+	e.scheduler.mu.Lock()
+	defer e.scheduler.mu.Unlock()
+	if it.sending {
+		t.Error("sending still true after finishSend returned")
+	}
+	if it.state != Pending {
+		t.Errorf("state = %v, want Pending (resendAfter set during archiving retries)", it.state)
+	}
+	if it.resendAfter {
+		t.Error("resendAfter still set after finishSend re-armed the item")
+	}
+	if renameCalls != 1 {
+		t.Errorf("Rename called %d times, want exactly 1 (the retry must stop once resendAfter is set)", renameCalls)
+	}
+}
+
+func TestFinishSendOrphanedResendAfterExhaustedArchiveEmitsDropped(t *testing.T) {
+	t.Parallel()
+	renameErr := errors.New("simulated rename failure")
+	renameCalls := 0
+	var it *item
+	e := archiveTestEngine(t, Options{
+		Clock:             clock.Real{},
+		MoveRetries:       1,
+		MoveRetryInterval: 5 * time.Millisecond,
+		MkdirAll:          func(string, os.FileMode) error { return nil },
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == "/watch/A.NC" {
+				return fakeFileInfo{}, nil // unchanged since it was sent
+			}
+			return nil, os.ErrNotExist // the sent/ destination doesn't exist yet
+		},
+		Rename: func(oldpath, newpath string) error {
+			if oldpath != "/watch/A.NC" {
+				t.Fatalf("unexpected Rename(%q, %q)", oldpath, newpath)
+			}
+			renameCalls++
+			if renameCalls == 2 {
+				it.resendAfter = true // a Changed arriving on the last allowed attempt
+			}
+			return renameErr
+		},
+	})
+	it = &item{name: "A.NC", path: "/watch/A.NC", state: Sending, sending: true, orphaned: true}
+	e.scheduler.items["A.NC"] = it
+
+	e.scheduler.finishSend(context.Background(), it,
+		sendSource{root: "/watch", base: "A.NC", path: "/watch/A.NC"}, nil, "")
+
+	e.scheduler.mu.Lock()
+	_, stillThere := e.scheduler.items["A.NC"]
+	e.scheduler.mu.Unlock()
+	if stillThere {
+		t.Error("orphaned item still in queue after finishSend, want dropped")
+	}
+	if renameCalls != 2 {
+		t.Errorf("Rename called %d times, want exactly 2 (both allowed attempts)", renameCalls)
+	}
+
+	evs := takeQueued(t, e)
+	if len(evs) == 0 || evs[len(evs)-1].State != Dropped || evs[len(evs)-1].Message != DroppedWatchFolderChanged {
+		t.Errorf("events = %+v, want the SentUnfiled row replaced by Dropped (%q)", evs, DroppedWatchFolderChanged)
+	}
+}
+
 func TestNextDeadlineElapsedReturnsMinimalPoll(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, nil)

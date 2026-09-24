@@ -37,15 +37,19 @@ const archiveTimestampLayout = "20060102-150405"
 // under that name by renaming it aside first with a timestamp, and retries
 // the whole move on failure before giving up and reporting SentUnfiled. A
 // manual send (SendFile) is never archived.
+//
+// Before every attempt it re-checks the item and the file. A manual send, or
+// a newer report of the file, means this content is no longer the one to
+// archive; a size or modification time that differs from what was sent
+// means the file has changed since, as when a post-processor rewrites it
+// right after the upload (on Windows the rename also fails until it is
+// done). Either way the file is left in place and the send reported as
+// Sent: finishSend re-queues a newer report, and the watcher reports a
+// rewrite once it settles.
 func (s *scheduler) archiveSent(ctx context.Context, it *item, src sendSource) {
 	s.mu.Lock()
-	manual, name := it.manual, it.name
+	name := it.name
 	s.mu.Unlock()
-
-	if manual {
-		s.setTerminal(it, Sent, "File sent")
-		return
-	}
 
 	sentDir := filepath.Join(src.root, watch.SentDir, src.dir)
 	dest := filepath.Join(sentDir, src.base)
@@ -58,6 +62,25 @@ func (s *scheduler) archiveSent(ctx context.Context, it *item, src sendSource) {
 				break
 			}
 		}
+
+		s.mu.Lock()
+		stop := it.manual || it.resendAfter
+		s.mu.Unlock()
+		if stop {
+			s.setTerminal(it, Sent, "File sent")
+			return
+		}
+
+		info, err := s.e.opts.Stat(path)
+		if err != nil {
+			lastErr = fmt.Errorf("engine: verify sent file before archiving: %w", err)
+			continue
+		}
+		if info.Size() != src.size || !info.ModTime().Equal(src.modTime) {
+			s.setTerminal(it, Sent, "File sent, but it changed after being sent, so it was left in place")
+			return
+		}
+
 		if err := s.moveIntoSent(sentDir, dest, path); err != nil {
 			lastErr = err
 			continue
