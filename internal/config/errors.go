@@ -40,8 +40,8 @@ var (
 	// ErrExtension reports an extension that does not start with a dot.
 	ErrExtension = errors.New(`config: extension must start with "."`)
 
-	// ErrSerial reports a serial that is not a decimal number 0-65535,
-	// optionally prefixed with "G3-".
+	// ErrSerial reports a serial that is not a decimal number
+	// 0-4294967295, optionally prefixed with "G3-".
 	ErrSerial = errors.New("config: invalid serial")
 
 	// ErrDefaultPath reports that neither os.UserConfigDir nor

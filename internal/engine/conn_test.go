@@ -74,7 +74,7 @@ func newConnTestNewClient(port int) func(masso.Options) (Client, error) {
 
 // newConnTestSim starts a simulator with short-lived timeouts suitable for
 // a real (not fake) clock, and returns it alongside matching Options.
-func newConnTestSim(t *testing.T, serial uint16) *sim.Controller {
+func newConnTestSim(t *testing.T, serial uint32) *sim.Controller {
 	t.Helper()
 	s, err := sim.New(sim.Options{Serial: serial, Version: "5-Axis v5.13"})
 	if err != nil {
@@ -91,7 +91,7 @@ func newConnTestSim(t *testing.T, serial uint16) *sim.Controller {
 // connTestOptions returns Options with every timing field short enough for
 // a real clock to exercise quickly, and the given serial configured. The
 // caller still supplies NewClient and, typically, Config.Address.
-func connTestOptions(serial uint16) Options {
+func connTestOptions(serial uint32) Options {
 	return Options{
 		Config: config.Config{Serial: masso.SerialString(serial)},
 		ClientOptions: masso.Options{

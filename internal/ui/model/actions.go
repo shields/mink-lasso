@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 
 	"msrl.dev/mink-lasso/internal/masso"
+	"msrl.dev/mink-lasso/internal/watch"
 )
 
 // ErrNoEngine is returned by an action that has no local-only meaning
@@ -176,7 +177,7 @@ func (m *Model) SentFolderPath() string {
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "sent")
+	return filepath.Join(dir, watch.SentDir)
 }
 
 // RetryEnabled reports whether Retry(name) currently makes sense: name has

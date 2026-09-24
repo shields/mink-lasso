@@ -40,7 +40,7 @@ const (
 // satisfied by *engine.Engine; Options.Engine may be nil in tests and in
 // any other context where actions should only update local state.
 type Control interface {
-	SetSerial(serial uint16)
+	SetSerial(serial uint32)
 	SetWatchDir(dir string) error
 	SetUploadWhileMachining(v bool)
 	RefreshTools()
@@ -135,7 +135,7 @@ type Model struct {
 	onChange     func(Changes)
 
 	connKind     engine.ConnKind
-	connSerial   uint16
+	connSerial   uint32
 	connAddr     *net.UDPAddr
 	connIdentity masso.Identity
 	connErr      error

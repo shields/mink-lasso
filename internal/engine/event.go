@@ -67,7 +67,7 @@ func (k ConnKind) String() string {
 // Err is set only for Lost.
 type ConnState struct {
 	Kind     ConnKind
-	Serial   uint16
+	Serial   uint32
 	Addr     *net.UDPAddr
 	Identity masso.Identity
 	Err      error
@@ -166,6 +166,9 @@ func (s TransferState) Terminal() bool {
 // TransferEvent reports a change in one file's transfer state. Manual is
 // true only for a file queued through SendFile.
 type TransferEvent struct {
+	// Name identifies the file, and is what Retry takes: its path relative
+	// to the watch folder, with OS-native separators, or just its base
+	// name for a manual send.
 	Name    string
 	Path    string
 	Size    int64

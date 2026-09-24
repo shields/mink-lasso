@@ -28,7 +28,7 @@ import (
 type fakeControl struct {
 	mu sync.Mutex
 
-	serials     []uint16
+	serials     []uint32
 	watchDirs   []string
 	watchDirErr error
 	// watchDirErrs, if non-nil, supplies a distinct error per SetWatchDir
@@ -44,7 +44,7 @@ type fakeControl struct {
 	sendErr      error
 }
 
-func (f *fakeControl) SetSerial(serial uint16) {
+func (f *fakeControl) SetSerial(serial uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.serials = append(f.serials, serial)

@@ -39,12 +39,21 @@ const (
 	// accepts for an upload.
 	MaxFileName = 15
 
+	// MaxUploadDir is the longest upload directory, in bytes, that fits the
+	// upload-start request's one-byte path length.
+	MaxUploadDir = 255
+
+	// MaxStatusFile is the longest current-file name, in ASCII bytes, a
+	// status reply carries.
+	MaxStatusFile = 33
+
 	// MaxPacket is a receive buffer size large enough for any reply this
 	// package decodes; the largest is the 270-byte status packet.
 	MaxPacket = 2048
 )
 
-// Packet type bytes (offset 4 of every datagram), from docs/protocol.md §3.
+// Packet type bytes (offset 4 of every datagram), from docs/protocol.md §3
+// and §5.5.
 // The controller reuses the same type byte for a request and its reply.
 const (
 	// TypeStatus marks a keepalive/status request or a status reply.
@@ -65,4 +74,8 @@ const (
 
 	// TypeUploadChunk marks an upload data-chunk request or its ACK.
 	TypeUploadChunk byte = 0x0B
+
+	// TypeUploadAbort marks the notification a client sends after an
+	// acknowledged upload fails. It has no reply.
+	TypeUploadAbort byte = 0x0C
 )

@@ -31,7 +31,7 @@ const discoverTimeout = 3 * time.Second
 
 // requireSerial reads and parses MINK_LASSO_SERIAL, skipping the test with a
 // clear message when it is unset.
-func requireSerial(t *testing.T) uint16 {
+func requireSerial(t *testing.T) uint32 {
 	t.Helper()
 
 	raw := os.Getenv("MINK_LASSO_SERIAL")
@@ -78,7 +78,7 @@ type connection struct {
 // reuses the returned address with connect (a unicast masso.Client.Connect)
 // instead of broadcasting again: AGENTS.md asks to keep broadcasts to a
 // minimum, since every one re-targets every controller that hears it.
-func discoverController(t *testing.T, serial uint16) *net.UDPAddr {
+func discoverController(t *testing.T, serial uint32) *net.UDPAddr {
 	t.Helper()
 
 	client, err := masso.NewClient(masso.Options{})

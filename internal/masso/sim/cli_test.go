@@ -38,7 +38,7 @@ func TestMain_FlagError(t *testing.T) {
 func TestMain_SerialOutOfRange(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if got := sim.Main(t.Context(), []string{"-serial", "70000"}, &out); got != 2 {
+	if got := sim.Main(t.Context(), []string{"-serial", "4294967296"}, &out); got != 2 {
 		t.Fatalf("Main() = %d, want 2", got)
 	}
 	if !strings.Contains(out.String(), "out of range") {

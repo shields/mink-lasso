@@ -46,7 +46,7 @@ const connectedMessage = "engine: connected"
 // testE2E starts the built exe headless against a temporary watch folder and
 // confirms it discovers, connects, holds an open file, uploads it once
 // closed, and moves it to sent/.
-func testE2E(t *testing.T, addr *net.UDPAddr, serial uint16) {
+func testE2E(t *testing.T, addr *net.UDPAddr, serial uint32) {
 	t.Helper()
 
 	exe := os.Getenv("MINK_LASSO_EXE")

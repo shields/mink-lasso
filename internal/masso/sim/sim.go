@@ -44,9 +44,9 @@ type Options struct {
 	// random loopback port).
 	Addr string
 
-	// Serial is the controller serial number returned in Identity and
-	// ConfigReply.
-	Serial uint16
+	// Serial is the controller serial number returned in Identity; its low
+	// 16 bits are echoed in ConfigReply.
+	Serial uint32
 
 	// Version is the firmware version string returned in Identity (for
 	// example "5-Axis v5.13").
@@ -76,7 +76,7 @@ type Options struct {
 type Controller struct {
 	conn    net.PacketConn
 	logger  *slog.Logger
-	serial  uint16
+	serial  uint32
 	version string
 	tools   []string
 
@@ -86,19 +86,25 @@ type Controller struct {
 	discoveries int
 	keepalives  int
 
+	uploading     bool
 	uploadName    string
 	uploadSize    uint32
 	uploadData    []byte
 	acceptedCount uint32
 	seenChunk     map[uint32]bool
+	chunkRequests int
+	aborts        int
 
 	files map[string][]byte
 
 	startResult      byte
 	chunkResult      byte
+	dropStartAcks    int
+	dropChunk        func(chunkIndex uint32) bool
 	dropAck          func(chunkIndex uint32) bool
 	duplicateReplies bool
 	silentAfterChunk int
+	silencedByChunk  bool
 	silent           bool
 
 	done      chan struct{}
@@ -184,16 +190,28 @@ func (c *Controller) serve() {
 	}
 }
 
-// handlePacket decodes and dispatches one datagram. A malformed packet, or
-// any packet received while silenced, is dropped without a reply.
+// handlePacket decodes and dispatches one datagram. A malformed packet is
+// dropped without a reply. Every decoded chunk request counts toward
+// ChunkRequests and every upload-abort notification is handled, even while
+// silenced; anything else received while silenced is dropped without a
+// reply.
 func (c *Controller) handlePacket(pkt []byte, src net.Addr) {
-	if c.shouldStaySilent() {
-		return
-	}
-
 	req, err := masso.DecodeRequest(pkt)
 	if err != nil {
 		c.logger.Debug("sim: dropping malformed packet", "error", err, "from", src)
+		return
+	}
+	if _, ok := req.(masso.UploadChunkRequest); ok {
+		c.mu.Lock()
+		c.chunkRequests++
+		c.mu.Unlock()
+	}
+	if _, ok := req.(masso.UploadAbortRequest); ok {
+		c.logger.Info("sim: request", "type", fmt.Sprintf("%T", req), "from", src)
+		c.handleUploadAbort()
+		return
+	}
+	if c.shouldStaySilent() {
 		return
 	}
 	c.logger.Info("sim: request", "type", fmt.Sprintf("%T", req), "from", src)
@@ -213,7 +231,7 @@ func (c *Controller) handlePacket(pkt []byte, src net.Addr) {
 		c.handleUploadChunk(r, src)
 	default:
 		// masso.Request's implementation set is closed to the masso
-		// package; DecodeRequest never actually returns anything else.
+		// package, and UploadAbortRequest was handled above.
 	}
 }
 
@@ -222,10 +240,16 @@ func (c *Controller) handlePacket(pkt []byte, src net.Addr) {
 func (c *Controller) shouldStaySilent() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.silent {
-		return true
+	return c.silent || c.silencedByChunk
+}
+
+// updateSilencedByChunk latches SetSilentAfterChunk's silence once the
+// accepted count passes its threshold, so a later abort, which resets the
+// count, does not lift it. Caller holds mu.
+func (c *Controller) updateSilencedByChunk() {
+	if c.silentAfterChunk >= 0 && int(c.acceptedCount) > c.silentAfterChunk {
+		c.silencedByChunk = true
 	}
-	return c.silentAfterChunk >= 0 && int(c.acceptedCount) > c.silentAfterChunk
 }
 
 // targetFor returns where a reply to a request from src should go: the
@@ -260,7 +284,7 @@ func (c *Controller) handleConfig(src net.Addr) {
 	c.mu.Lock()
 	serial := c.serial
 	c.mu.Unlock()
-	c.send(masso.ConfigReply{Serial: serial}.Encode(), c.targetFor(src))
+	c.send(masso.ConfigReply{Serial: uint16(serial & 0xFFFF)}.Encode(), c.targetFor(src))
 }
 
 func (c *Controller) handleKeepalive(src net.Addr) {
@@ -283,50 +307,81 @@ func (c *Controller) handleToolQuery(r masso.ToolQueryRequest, src net.Addr) {
 
 func (c *Controller) handleUploadStart(r masso.UploadStartRequest, src net.Addr) {
 	c.mu.Lock()
-	c.uploadName = r.Name
-	c.uploadSize = r.Size
-	// The final size is already known, so preallocate it rather than
-	// growing uploadData one append at a time as chunks arrive, which
-	// would otherwise reallocate and copy the whole buffer several times
-	// over the course of a large upload.
-	c.uploadData = make([]byte, 0, r.Size)
-	c.acceptedCount = 0
-	c.seenChunk = make(map[uint32]bool)
 	result := c.startResult
+	c.resetUpload()
+	c.uploading = result == masso.StartOK || result == masso.StartAlreadyStarted
+	c.uploadName = masso.JoinUploadPath(r.Path, r.Name)
+	c.uploadSize = r.Size
+	if c.uploading {
+		// The final size is already known, so preallocate it rather than
+		// growing uploadData one append at a time as chunks arrive, which
+		// would otherwise reallocate and copy the whole buffer several
+		// times over the course of a large upload.
+		c.uploadData = make([]byte, 0, r.Size)
+	}
+	dropAck := c.dropStartAcks > 0
+	if dropAck {
+		c.dropStartAcks--
+	}
 	c.mu.Unlock()
 
+	if dropAck {
+		return
+	}
 	c.send(masso.StartAck{Result: result}.Encode(), c.targetFor(src))
 }
 
+// resetUpload discards any upload in progress. Caller holds mu.
+func (c *Controller) resetUpload() {
+	c.uploading = false
+	c.uploadData = nil
+	c.acceptedCount = 0
+	c.seenChunk = make(map[uint32]bool)
+}
+
+// handleUploadAbort discards any upload in progress; it sends no reply.
+func (c *Controller) handleUploadAbort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aborts++
+	c.resetUpload()
+}
+
 // handleUploadChunk implements the chunk state machine described in the
-// package's caller-facing API: a chunk is accepted, advancing Accepted,
-// only when its index matches the number of chunks accepted so far;
-// anything else (a retransmit of an already-accepted chunk, or a chunk that
-// arrived out of order) is re-acknowledged with the current Accepted count
-// and does not change stored state. SetDropAck's callback runs at most once
-// per chunk index — the first time that index is seen — so a client's
-// retransmit of a dropped chunk always gets through.
+// package's caller-facing API: while an upload is in progress, a chunk is
+// accepted, advancing Accepted, only when its index matches the number of
+// chunks accepted so far; anything else (a retransmit of an
+// already-accepted chunk, a chunk that arrived out of order, or any chunk
+// with no upload in progress) is re-acknowledged with the current Accepted
+// count and does not change stored state. The SetDropChunk and SetDropAck
+// callbacks run at most once per chunk index — the first time that index
+// is seen — so a client's retransmit always gets through.
 func (c *Controller) handleUploadChunk(r masso.UploadChunkRequest, src net.Addr) {
 	c.mu.Lock()
 	first := !c.seenChunk[r.Index]
 	c.seenChunk[r.Index] = true
-	dropFn := c.dropAck
+	dropChunkFn, dropAckFn := c.dropChunk, c.dropAck
 	c.mu.Unlock()
 
-	drop := first && dropFn != nil && dropFn(r.Index)
+	if first && dropChunkFn != nil && dropChunkFn(r.Index) {
+		return
+	}
+	dropAck := first && dropAckFn != nil && dropAckFn(r.Index)
 
 	var storedName string
 	var storedSize int
 	justCompleted := false
 
 	c.mu.Lock()
-	if !drop && r.Index == c.acceptedCount {
+	if c.uploading && r.Index == c.acceptedCount {
 		c.uploadData = append(c.uploadData, r.Data...)
 		c.acceptedCount++
+		c.updateSilencedByChunk()
 		if len(c.uploadData) == int(c.uploadSize) {
 			stored := make([]byte, len(c.uploadData))
 			copy(stored, c.uploadData)
 			c.files[c.uploadName] = stored
+			c.uploading = false
 			storedName, storedSize, justCompleted = c.uploadName, len(stored), true
 		}
 	}
@@ -337,7 +392,7 @@ func (c *Controller) handleUploadChunk(r masso.UploadChunkRequest, src net.Addr)
 	if justCompleted {
 		c.logger.Info(fmt.Sprintf("stored %s (%d bytes)", storedName, storedSize))
 	}
-	if drop {
+	if dropAck {
 		return
 	}
 	c.send(masso.ChunkAck{Result: result, Accepted: accepted}.Encode(), c.targetFor(src))
@@ -388,7 +443,9 @@ func (c *Controller) SetStatus(s masso.Status) {
 }
 
 // SetStartResult replaces the result byte sent in every future upload-start
-// ACK. The default is masso.StartOK.
+// ACK. The default is masso.StartOK. A start answered with anything but
+// masso.StartOK or masso.StartAlreadyStarted begins no upload, so later
+// chunks are acknowledged but not stored.
 func (c *Controller) SetStartResult(result byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -403,13 +460,34 @@ func (c *Controller) SetChunkResult(result byte) {
 	c.chunkResult = result
 }
 
+// SetDropStartAcks makes the next n upload-start requests go unanswered:
+// each is processed normally, beginning an upload, but its ACK is not sent,
+// as though the reply were lost.
+func (c *Controller) SetDropStartAcks(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dropStartAcks = n
+}
+
+// SetDropChunk installs a callback consulted the first time each chunk
+// index is seen in the current upload: when it returns true for that index,
+// the Controller ignores that one request entirely, neither accepting nor
+// acknowledging it, as though the request were lost. Because the callback
+// only runs once per index, a client's retransmit of the same chunk is
+// always processed normally. A request dropped this way is not also offered
+// to the SetDropAck callback. Pass nil to stop dropping any request.
+func (c *Controller) SetDropChunk(f func(chunkIndex uint32) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dropChunk = f
+}
+
 // SetDropAck installs a callback consulted the first time each chunk index
 // is seen in the current upload: when it returns true for that index, the
-// Controller silently drops the ACK for that one request instead of
-// sending it. Because the callback only runs once per index, a client's
-// subsequent retransmit of the same chunk is always acknowledged normally
-// — this knob simulates a single lost ACK, not a permanently unreachable
-// chunk. Pass nil to stop dropping any ACK.
+// Controller processes that one request normally, accepting it if it is in
+// order, but does not send its ACK, as though the reply were lost. Because
+// the callback only runs once per index, a client's retransmit of the same
+// chunk is always acknowledged. Pass nil to stop dropping any ACK.
 func (c *Controller) SetDropAck(f func(chunkIndex uint32) bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -426,16 +504,19 @@ func (c *Controller) SetDuplicateReplies(enabled bool) {
 
 // SetSilentAfterChunk stops the Controller from answering anything —
 // including discovery, config, keepalive, and tool queries, not only
-// upload chunks — once the chunk at index n has been accepted. Pass -1 (the
-// default) to disable.
+// upload chunks — once the chunk at index n has been accepted, until the
+// next call. Pass -1 (the default) to disable.
 func (c *Controller) SetSilentAfterChunk(n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.silentAfterChunk = n
+	c.silencedByChunk = false
+	c.updateSilencedByChunk()
 }
 
 // SetSilent makes the Controller ignore every request, as though the
-// controller were powered off.
+// controller were powered off, except that upload-abort notifications are
+// still counted and processed.
 func (c *Controller) SetSilent(silent bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -456,6 +537,22 @@ func (c *Controller) Keepalives() int {
 	return c.keepalives
 }
 
+// ChunkRequests reports how many upload-chunk requests have been received,
+// including ones dropped by SetDropChunk or received while silenced.
+func (c *Controller) ChunkRequests() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.chunkRequests
+}
+
+// Aborts reports how many upload-abort notifications have been received,
+// including ones received while silenced.
+func (c *Controller) Aborts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.aborts
+}
+
 // LastReplyTarget returns the address every reply is currently sent to, or
 // nil if no discovery request has arrived yet.
 func (c *Controller) LastReplyTarget() *net.UDPAddr {
@@ -464,7 +561,8 @@ func (c *Controller) LastReplyTarget() *net.UDPAddr {
 	return c.replyTarget
 }
 
-// Files returns a snapshot of every stored upload, keyed by name. Each
+// Files returns a snapshot of every stored upload, keyed by its
+// drive-relative location as masso.JoinUploadPath forms it. Each
 // byte slice is a copy, safe for the caller to keep or mutate.
 func (c *Controller) Files() map[string][]byte {
 	c.mu.Lock()
@@ -478,7 +576,8 @@ func (c *Controller) Files() map[string][]byte {
 	return out
 }
 
-// File returns a copy of one stored upload's bytes, and whether it exists.
+// File returns a copy of the bytes stored at a drive-relative location
+// (as in Files), and whether it exists.
 func (c *Controller) File(name string) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

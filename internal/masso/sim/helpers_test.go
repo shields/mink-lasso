@@ -205,35 +205,47 @@ func discover(t *testing.T, conn *net.UDPConn, addr *net.UDPAddr) masso.Identity
 // and asserts every ACK along the way.
 func uploadFile(t *testing.T, conn *net.UDPConn, addr *net.UDPAddr, name string, data []byte) {
 	t.Helper()
-	startPkt, err := masso.UploadStart(uint32(len(data)), name)
-	if err != nil {
-		t.Fatalf("UploadStart: %v", err)
-	}
-	mustWrite(t, conn, addr, startPkt)
-	ack := readReply(t, conn)
-	sa, ok := ack.(masso.StartAck)
-	if !ok || sa.Result != masso.StartOK {
-		t.Fatalf("start ack = %+v (ok=%v), want StartOK", ack, ok)
-	}
-
+	startUpload(t, conn, addr, name, len(data))
 	sent := 0
 	for idx := uint32(0); sent < len(data); idx++ {
 		end := min(sent+masso.MaxChunkData, len(data))
-		chunkPkt, err := masso.UploadChunk(idx, data[sent:end])
-		if err != nil {
-			t.Fatalf("UploadChunk(%d): %v", idx, err)
-		}
-		mustWrite(t, conn, addr, chunkPkt)
-		reply := readReply(t, conn)
-		ca, ok := reply.(masso.ChunkAck)
-		if !ok {
-			t.Fatalf("reply type = %T, want ChunkAck", reply)
-		}
-		if ca.Result != masso.ChunkOK || ca.Accepted != idx+1 {
+		sendChunk(t, conn, addr, idx, data[sent:end])
+		if ca := readChunkAck(t, conn); ca.Result != masso.ChunkOK || ca.Accepted != idx+1 {
 			t.Fatalf("chunk %d ack = %+v, want {Result:OK Accepted:%d}", idx, ca, idx+1)
 		}
 		sent = end
 	}
+}
+
+func startUpload(t *testing.T, conn *net.UDPConn, addr *net.UDPAddr, name string, size int) {
+	t.Helper()
+	startPkt, err := masso.UploadStart(uint32(size), "", name)
+	if err != nil {
+		t.Fatalf("UploadStart: %v", err)
+	}
+	mustWrite(t, conn, addr, startPkt)
+	if reply := readReply(t, conn); reply != (masso.StartAck{Result: masso.StartOK}) {
+		t.Fatalf("start ack = %#v, want StartOK", reply)
+	}
+}
+
+func sendChunk(t *testing.T, conn *net.UDPConn, addr *net.UDPAddr, index uint32, data []byte) {
+	t.Helper()
+	pkt, err := masso.UploadChunk(index, data)
+	if err != nil {
+		t.Fatalf("UploadChunk(%d): %v", index, err)
+	}
+	mustWrite(t, conn, addr, pkt)
+}
+
+func readChunkAck(t *testing.T, conn *net.UDPConn) masso.ChunkAck {
+	t.Helper()
+	reply := readReply(t, conn)
+	ack, ok := reply.(masso.ChunkAck)
+	if !ok {
+		t.Fatalf("reply type = %T, want ChunkAck", reply)
+	}
+	return ack
 }
 
 // replyTimeout bounds how long a test waits for an expected reply. Loopback

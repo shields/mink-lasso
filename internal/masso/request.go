@@ -18,13 +18,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Request is implemented by every decoded client-to-controller request:
 // DiscoveryRequest, ConfigRequest, KeepaliveRequest, ToolQueryRequest,
-// UploadStartRequest, and UploadChunkRequest. The set of implementations is
-// closed to this package.
+// UploadStartRequest, UploadChunkRequest, and UploadAbortRequest. The set of
+// implementations is closed to this package.
 type Request interface {
 	isRequest()
 }
@@ -71,7 +72,10 @@ func (ToolQueryRequest) isRequest() {}
 type UploadStartRequest struct {
 	// Size is the total file size in bytes.
 	Size uint32
-	// Name is the file name, rooted at the USB drive.
+	// Path is the raw path field: `\` for the drive root, otherwise a
+	// backslash-separated directory. JoinUploadPath combines it with Name.
+	Path string
+	// Name is the bare file name.
 	Name string
 }
 
@@ -87,6 +91,12 @@ type UploadChunkRequest struct {
 }
 
 func (UploadChunkRequest) isRequest() {}
+
+// UploadAbortRequest is a decoded upload-abort notification
+// (TypeUploadAbort). It carries no fields.
+type UploadAbortRequest struct{}
+
+func (UploadAbortRequest) isRequest() {}
 
 // Discovery encodes a discovery request that asks every controller that
 // hears it to send replies to replyPort (docs/protocol.md §3.1).
@@ -126,47 +136,63 @@ func Keepalive(t time.Time) []byte {
 	return frame(TypeStatus, payload)
 }
 
-// toolQueryTrailer is the constant trailer Masso Link appends to every
-// tool query; only the index byte varies (docs/protocol.md §3.4).
-var toolQueryTrailer = [4]byte{0x22, 0x2C, 0x1C, 0x0B}
-
-// ToolQuery encodes a tool-table query for the 1-based tool index.
+// ToolQuery encodes a tool-table query for the 1-based tool index, followed
+// by four zero bytes (docs/protocol.md §3.4).
 func ToolQuery(index uint8) []byte {
-	payload := append([]byte{index}, toolQueryTrailer[:]...)
-	return frame(TypeTool, payload)
+	return frame(TypeTool, []byte{index, 0, 0, 0, 0})
 }
 
-// uploadPath is the fixed root path ("\") every upload targets. The
-// protocol supports subdirectory paths, but this package only ever
-// uploads to the drive root.
-const uploadPath = `\`
+const rootUploadPath = `\`
 
-// uploadNameField is the fixed size of the name field in an upload-start
-// request: MaxFileName characters plus a NUL. Masso Link always sends the
-// field at this size (a captured start packet for "CLTEST.NC" is 30 bytes,
-// six zero bytes after the name's NUL), and the controller has only ever
-// been seen accepting that layout, so it is reproduced exactly rather than
-// padded to the 4-byte rule that every other request follows.
-const uploadNameField = MaxFileName + 1
+// uploadStartReserved is the number of zero bytes that follow the name's
+// NUL in an upload-start request (docs/protocol.md §5.1).
+const uploadStartReserved = 3
 
 // UploadStart encodes an upload-start request for a size-byte file named
-// name, rooted at the USB drive (docs/protocol.md §5.1). It returns
-// ErrBadFileName if name fails ValidateFileName.
-func UploadStart(size uint32, name string) ([]byte, error) {
+// name in directory dir on the USB drive (docs/protocol.md §5.1). An empty
+// dir means the drive root; otherwise dir is a backslash-separated relative
+// directory such as `JOBS\SUB`. It returns ErrBadFileName if name fails
+// ValidateFileName, or ErrBadUploadDir if dir fails ValidateUploadDir.
+func UploadStart(size uint32, dir, name string) ([]byte, error) {
 	if err := ValidateFileName(name); err != nil {
 		return nil, err
 	}
-	payload := make([]byte, 0, 4+2+1+len(uploadPath)+1+uploadNameField)
-	sizeBuf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(sizeBuf, size)
-	payload = append(payload, sizeBuf...)
+	if err := ValidateUploadDir(dir); err != nil {
+		return nil, err
+	}
+	path := dir
+	if path == "" {
+		path = rootUploadPath
+	}
+	payload := make([]byte, 0, 4+2+1+len(path)+1+len(name)+1+uploadStartReserved)
+	payload = binary.LittleEndian.AppendUint32(payload, size)
 	payload = append(payload, 0, 0) // reserved
-	payload = append(payload, byte(len(uploadPath)))
-	payload = append(payload, uploadPath...)
-	payload = append(payload, 0) // path terminator
+	// ValidateUploadDir bounds path to MaxUploadDir (255) bytes; the mask
+	// proves that to the static analyzer.
+	payload = append(payload, byte(len(path)&0xFF))
+	payload = append(payload, path...)
+	payload = append(payload, 0)
 	payload = append(payload, name...)
-	payload = append(payload, make([]byte, uploadNameField-len(name))...) // NUL and fill
+	payload = append(payload, 0)
+	payload = append(payload, make([]byte, uploadStartReserved)...)
 	return frame(TypeUploadStart, payload), nil
+}
+
+// JoinUploadPath returns the drive-relative location an upload-start
+// request's path and name fields name, without a leading separator: the
+// bare name for a root upload, otherwise `DIR\NAME`.
+func JoinUploadPath(path, name string) string {
+	dir := strings.Trim(path, `\`)
+	if dir == "" {
+		return name
+	}
+	return dir + `\` + name
+}
+
+// UploadAbort encodes the payload-free notification sent after an
+// acknowledged upload fails (docs/protocol.md §5.5).
+func UploadAbort() []byte {
+	return frame(TypeUploadAbort, make([]byte, 5))
 }
 
 // UploadChunk encodes a data chunk for a 0-based chunk index
@@ -187,7 +213,8 @@ func UploadChunk(index uint32, data []byte) ([]byte, error) {
 
 // DecodeRequest parses a client-to-controller datagram and returns its
 // decoded form: DiscoveryRequest, ConfigRequest, KeepaliveRequest,
-// ToolQueryRequest, UploadStartRequest, or UploadChunkRequest. Decoders
+// ToolQueryRequest, UploadStartRequest, UploadChunkRequest, or
+// UploadAbortRequest. Decoders
 // require only the bytes needed for their meaningful fields, tolerating
 // whatever trailing padding a real sender includes.
 func DecodeRequest(pkt []byte) (Request, error) {
@@ -208,6 +235,8 @@ func DecodeRequest(pkt []byte) (Request, error) {
 		return decodeUploadStartRequest(body)
 	case TypeUploadChunk:
 		return decodeUploadChunkRequest(body)
+	case TypeUploadAbort:
+		return UploadAbortRequest{}, nil
 	default:
 		return nil, fmt.Errorf("%w: 0x%02X", ErrUnknownType, typ)
 	}
@@ -248,9 +277,7 @@ func decodeToolQueryRequest(body []byte) (Request, error) {
 }
 
 // decodeUploadStartRequest parses size(4) | reserved(2) | pathlen(1) |
-// path(pathlen) | 0x00 | name | 0x00 | padding. pathLen is read from the
-// packet rather than assumed to be 1, so this decodes whatever a real
-// client sends even though UploadStart always encodes a bare "\" path.
+// path(pathlen) | 0x00 | name | 0x00 | padding.
 func decodeUploadStartRequest(body []byte) (Request, error) {
 	const minHeader = 4 + 2 + 1 // size + reserved + pathlen
 	if len(body) < minHeader {
@@ -262,6 +289,7 @@ func decodeUploadStartRequest(body []byte) (Request, error) {
 	if len(body) < nameStart {
 		return nil, fmt.Errorf("%w: upload-start request path", ErrMalformed)
 	}
+	path := string(body[minHeader : minHeader+pathLen])
 	name := body[nameStart:]
 	if i := bytes.IndexByte(name, 0); i >= 0 {
 		name = name[:i]
@@ -274,7 +302,7 @@ func decodeUploadStartRequest(body []byte) (Request, error) {
 	if err := ValidateFileName(string(name)); err != nil {
 		return nil, err
 	}
-	return UploadStartRequest{Size: size, Name: string(name)}, nil
+	return UploadStartRequest{Size: size, Path: path, Name: string(name)}, nil
 }
 
 func decodeUploadChunkRequest(body []byte) (Request, error) {

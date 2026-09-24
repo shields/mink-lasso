@@ -17,7 +17,8 @@
 // end. It owns the connection state machine (discovery, connect, keepalive,
 // reconnect), the machine gate that decides when an upload may start, the
 // one-at-a-time upload scheduler with retry and backoff, and archiving a
-// sent file into WatchDir/sent. Every state change is delivered, in order,
+// sent file into WatchDir/sent, under the same subfolder of WatchDir it was
+// found in. Every state change is delivered, in order,
 // as an Event on the channel returned by Events; nothing here blocks a slow
 // or absent consumer.
 //
@@ -64,7 +65,7 @@ type Client interface {
 	Run(ctx context.Context) error
 	Status() <-chan masso.Status
 	Tools(ctx context.Context) ([]masso.ToolRecord, error)
-	Upload(ctx context.Context, name string, r io.ReaderAt, size int64, progress func(sent, total int64)) error
+	Upload(ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64)) error
 	Remote() *net.UDPAddr
 	Close() error
 }
@@ -97,9 +98,9 @@ func (a clientAdapter) Status() <-chan masso.Status { return a.c.Status() }
 func (a clientAdapter) Tools(ctx context.Context) ([]masso.ToolRecord, error) { return a.c.Tools(ctx) }
 
 func (a clientAdapter) Upload(
-	ctx context.Context, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
+	ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
 ) error {
-	return a.c.Upload(ctx, name, r, size, progress)
+	return a.c.Upload(ctx, dir, name, r, size, progress)
 }
 
 func (a clientAdapter) Remote() *net.UDPAddr { return a.c.Remote() }
@@ -277,7 +278,7 @@ type Engine struct {
 	started atomic.Bool
 
 	mu            sync.Mutex
-	serial        uint16 // 0 means unconfigured
+	serial        uint32 // 0 means unconfigured
 	lastAddr      *net.UDPAddr
 	cancelAttempt context.CancelFunc
 	watchDir      string
@@ -291,7 +292,7 @@ type Engine struct {
 // commonly Masso Link itself already running — fails fast. New never starts
 // goroutines; call Run for that.
 func New(opts Options) (*Engine, error) {
-	var serial uint16
+	var serial uint32
 	if opts.Config.Serial != "" {
 		s, err := masso.ParseSerial(opts.Config.Serial)
 		if err != nil {

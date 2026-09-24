@@ -17,6 +17,7 @@ package masso
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,9 +74,9 @@ func TestToolQueryGolden(t *testing.T) {
 	t.Parallel()
 
 	want := []byte{
-		0x92, 0xB1, // CRC
+		0x66, 0x6F, // CRC
 		0x03, 0x00, 0x08, // magic, type
-		0x01, 0x22, 0x2C, 0x1C, 0x0B,
+		0x01, 0x00, 0x00, 0x00, 0x00,
 	}
 	if got := ToolQuery(1); !bytes.Equal(got, want) {
 		t.Errorf("ToolQuery(1) = % X, want % X", got, want)
@@ -83,8 +84,8 @@ func TestToolQueryGolden(t *testing.T) {
 }
 
 // capturedUploadStart is the upload-start packet for an 87-byte CLTEST.NC
-// exactly as captured from Masso Link v2.12 against firmware v5.13 (30 bytes:
-// the name field is a fixed 16 bytes, see uploadNameField).
+// exactly as captured from Masso Link v2.12 against firmware v5.13
+// (docs/protocol.md §5.1).
 var capturedUploadStart = []byte{
 	0x06, 0x39, // CRC
 	0x03, 0x00, 0x0A, // magic, type
@@ -92,7 +93,8 @@ var capturedUploadStart = []byte{
 	0x00, 0x00, // reserved
 	0x01, 0x5C, 0x00, // pathlen=1, "\", NUL
 	'C', 'L', 'T', 'E', 'S', 'T', '.', 'N', 'C', 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // rest of the 16-byte name field
+	0x00, 0x00, 0x00, // reserved
+	0x00, 0x00, 0x00, // 4-byte alignment padding
 }
 
 // TestUploadStartGolden checks UploadStart against the captured packet byte
@@ -100,28 +102,107 @@ var capturedUploadStart = []byte{
 func TestUploadStartGolden(t *testing.T) {
 	t.Parallel()
 
-	got, err := UploadStart(87, "CLTEST.NC")
+	got, err := UploadStart(87, "", "CLTEST.NC")
 	if err != nil {
 		t.Fatalf("UploadStart: unexpected error: %v", err)
 	}
 	if !bytes.Equal(got, capturedUploadStart) {
-		t.Errorf("UploadStart(87, \"CLTEST.NC\") = % X, want % X", got, capturedUploadStart)
+		t.Errorf("UploadStart(87, \"\", \"CLTEST.NC\") = % X, want % X", got, capturedUploadStart)
 	}
-	// A maximal name fills the field exactly; the packet length never changes.
-	longest, err := UploadStart(1, "ABCDEFGHIJK.TAP")
+}
+
+func TestUploadStartSubdirectoryGolden(t *testing.T) {
+	t.Parallel()
+
+	want := []byte{
+		0xE2, 0x0F, // CRC
+		0x03, 0x00, 0x0A, // magic, type
+		0x57, 0x00, 0x00, 0x00, // size = 87
+		0x00, 0x00, // reserved
+		0x08, 'J', 'O', 'B', 'S', '\\', 'S', 'U', 'B', 0x00, // pathlen=8, path, NUL
+		'C', 'L', 'T', 'E', 'S', 'T', '.', 'N', 'C', 0x00,
+		0x00, 0x00, 0x00, // reserved
+	}
+	got, err := UploadStart(87, `JOBS\SUB`, "CLTEST.NC")
 	if err != nil {
 		t.Fatalf("UploadStart: unexpected error: %v", err)
 	}
-	if len(longest) != len(capturedUploadStart) {
-		t.Errorf("UploadStart with a 15-character name is %d bytes, want %d", len(longest), len(capturedUploadStart))
+	if !bytes.Equal(got, want) {
+		t.Errorf("UploadStart(87, `JOBS\\SUB`, \"CLTEST.NC\") = % X, want % X", got, want)
+	}
+}
+
+func TestUploadStartLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		dir, name string
+		want      int
+	}{
+		{"", "A.TAP", 26},
+		{"", "CLTEST.NC", 30},
+		{"", "ABCDEFGHIJK.TAP", 34},
+		{"JOBS", "CLTEST.NC", 30},
+		{`JOBS\SUB`, "CLTEST.NC", 34},
+		{strings.Repeat("D", MaxUploadDir), "ABCDEFGHIJK.TAP", 2 + roundUp4(MaxUploadDir+MaxFileName+15)},
+	}
+	for _, tt := range tests {
+		got, err := UploadStart(1, tt.dir, tt.name)
+		if err != nil {
+			t.Errorf("UploadStart(1, %q, %q): unexpected error: %v", tt.dir, tt.name, err)
+			continue
+		}
+		if len(got) != tt.want {
+			t.Errorf("UploadStart(1, %q, %q) is %d bytes, want %d", tt.dir, tt.name, len(got), tt.want)
+		}
 	}
 }
 
 func TestUploadStartRejectsBadFileName(t *testing.T) {
 	t.Parallel()
 
-	if _, err := UploadStart(1, "bad/name"); !errors.Is(err, ErrBadFileName) {
+	if _, err := UploadStart(1, "", "bad/name"); !errors.Is(err, ErrBadFileName) {
 		t.Errorf("UploadStart with bad name: err = %v, want ErrBadFileName", err)
+	}
+}
+
+func TestUploadStartRejectsBadDir(t *testing.T) {
+	t.Parallel()
+
+	if _, err := UploadStart(1, `\JOBS`, "A.NC"); !errors.Is(err, ErrBadUploadDir) {
+		t.Errorf("UploadStart with bad dir: err = %v, want ErrBadUploadDir", err)
+	}
+}
+
+func TestUploadAbortGolden(t *testing.T) {
+	t.Parallel()
+
+	want := []byte{
+		0x96, 0xC3, // CRC
+		0x03, 0x00, 0x0C, // magic, type
+		0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	if got := UploadAbort(); !bytes.Equal(got, want) {
+		t.Errorf("UploadAbort() = % X, want % X", got, want)
+	}
+}
+
+func TestJoinUploadPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path, name, want string
+	}{
+		{`\`, "A.NC", "A.NC"},
+		{"", "A.NC", "A.NC"},
+		{"JOBS", "A.NC", `JOBS\A.NC`},
+		{`JOBS\SUB`, "A.NC", `JOBS\SUB\A.NC`},
+		{`\JOBS\`, "A.NC", `JOBS\A.NC`},
+	}
+	for _, tt := range tests {
+		if got := JoinUploadPath(tt.path, tt.name); got != tt.want {
+			t.Errorf("JoinUploadPath(%q, %q) = %q, want %q", tt.path, tt.name, got, tt.want)
+		}
 	}
 }
 
@@ -166,7 +247,11 @@ func TestUploadChunkAcceptsMaxSize(t *testing.T) {
 func TestDecodeRequestRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	uploadStart, err := UploadStart(87, "CLTEST.NC")
+	uploadStart, err := UploadStart(87, "", "CLTEST.NC")
+	if err != nil {
+		t.Fatalf("UploadStart: %v", err)
+	}
+	subdirStart, err := UploadStart(87, `JOBS\SUB`, "CLTEST.NC")
 	if err != nil {
 		t.Fatalf("UploadStart: %v", err)
 	}
@@ -190,8 +275,10 @@ func TestDecodeRequestRoundTrip(t *testing.T) {
 			KeepaliveRequest{Hour: 14, Minute: 7, Second: 30, Day: 24, Month: 8},
 		},
 		{"tool query", ToolQuery(5), ToolQueryRequest{Index: 5}},
-		{"upload start", uploadStart, UploadStartRequest{Size: 87, Name: "CLTEST.NC"}},
+		{"upload start", uploadStart, UploadStartRequest{Size: 87, Path: `\`, Name: "CLTEST.NC"}},
+		{"upload start subdir", subdirStart, UploadStartRequest{Size: 87, Path: `JOBS\SUB`, Name: "CLTEST.NC"}},
 		{"upload chunk", uploadChunk, UploadChunkRequest{Index: 3, Data: []byte("hello")}},
+		{"upload abort", UploadAbort(), UploadAbortRequest{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,7 +313,7 @@ func TestDecodeUploadStartCaptured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeRequest: unexpected error: %v", err)
 	}
-	want := UploadStartRequest{Size: 87, Name: "CLTEST.NC"}
+	want := UploadStartRequest{Size: 87, Path: `\`, Name: "CLTEST.NC"}
 	if got != want {
 		t.Errorf("DecodeRequest = %#v, want %#v", got, want)
 	}

@@ -43,6 +43,10 @@ func TestIntegration(t *testing.T) {
 		testUpload(t, addr)
 	})
 	//nolint:paralleltest // sequential by design; see TestIntegration's doc comment.
+	t.Run("UploadSubfolder", func(t *testing.T) {
+		testUploadSubfolder(t, addr)
+	})
+	//nolint:paralleltest // sequential by design; see TestIntegration's doc comment.
 	t.Run("E2E", func(t *testing.T) {
 		testE2E(t, addr, serial)
 	})

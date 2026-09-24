@@ -110,7 +110,7 @@ func TestClientAdapterUnconnected(t *testing.T) {
 	if err := a.Run(ctx); !errors.Is(err, masso.ErrNotConnected) {
 		t.Errorf("Run() error = %v, want ErrNotConnected", err)
 	}
-	if err := a.Upload(ctx, "TEST.NC", strings.NewReader(""), 0, nil); !errors.Is(err, masso.ErrNotConnected) {
+	if err := a.Upload(ctx, "", "TEST.NC", strings.NewReader(""), 0, nil); !errors.Is(err, masso.ErrNotConnected) {
 		t.Errorf("Upload() error = %v, want ErrNotConnected", err)
 	}
 }

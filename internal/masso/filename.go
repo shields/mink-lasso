@@ -14,7 +14,10 @@
 
 package masso
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Extensions are the file extensions, lower case with the leading dot, that
 // Masso Link offers for upload; the controller runs programs with these
@@ -29,16 +32,45 @@ func ValidateFileName(name string) error {
 	if len(name) < 1 || len(name) > MaxFileName {
 		return fmt.Errorf("%w: %q is %d bytes, want 1-%d", ErrBadFileName, name, len(name), MaxFileName)
 	}
-	if name == "." || name == ".." {
-		return fmt.Errorf("%w: %q is a reserved name", ErrBadFileName, name)
+	return validateComponent(name, ErrBadFileName)
+}
+
+// ValidateUploadDir reports whether dir is a valid upload directory: ""
+// for the drive root, or at most MaxUploadDir bytes of backslash-separated
+// components, each non-empty and following ValidateFileName's character
+// rules but not its length limit. It wraps ErrBadUploadDir with the
+// specific reason.
+func ValidateUploadDir(dir string) error {
+	if dir == "" {
+		return nil
 	}
-	for i := range len(name) {
-		b := name[i]
+	if len(dir) > MaxUploadDir {
+		return fmt.Errorf("%w: %q is %d bytes, want at most %d", ErrBadUploadDir, dir, len(dir), MaxUploadDir)
+	}
+	for component := range strings.SplitSeq(dir, `\`) {
+		if component == "" {
+			return fmt.Errorf("%w: %q has an empty component", ErrBadUploadDir, dir)
+		}
+		if err := validateComponent(component, ErrBadUploadDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateComponent applies the character rules shared by file names and
+// upload directory components, wrapping sentinel with the reason.
+func validateComponent(s string, sentinel error) error {
+	if s == "." || s == ".." {
+		return fmt.Errorf("%w: %q is a reserved name", sentinel, s)
+	}
+	for i := range len(s) {
+		b := s[i]
 		if b < 0x20 || b > 0x7E {
-			return fmt.Errorf("%w: %q has a non-printable byte at %d", ErrBadFileName, name, i)
+			return fmt.Errorf("%w: %q has a non-printable byte at %d", sentinel, s, i)
 		}
 		if b == '\\' || b == '/' || b == ':' {
-			return fmt.Errorf("%w: %q contains %q", ErrBadFileName, name, string(b))
+			return fmt.Errorf("%w: %q contains %q", sentinel, s, string(b))
 		}
 	}
 	return nil

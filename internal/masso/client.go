@@ -18,9 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
 	"net"
 	"slices"
 	"sync"
@@ -68,14 +66,32 @@ var (
 // that waits up to ReplyTimeout for its reply.
 const defaultAttempts = 3
 
-// maxToolIndex is the highest tool index Tools queries (docs/protocol.md
-// §3.4: the app iterates 1..118 on mill/router firmware).
-const maxToolIndex = 118
+// Upload chunk-phase tuning from docs/protocol.md §5.3.
+const (
+	// initialSRTT seeds the smoothed round-trip estimate.
+	initialSRTT = 60 * time.Millisecond
+
+	// minRTO and maxRTO clamp the chunk retransmit timeout.
+	minRTO = 40 * time.Millisecond
+	maxRTO = 250 * time.Millisecond
+
+	// maxWindow is the most chunks Upload keeps in flight.
+	maxWindow = 2
+
+	// cleanStreakToOpen is how many consecutive chunks must be acknowledged
+	// without a retransmission before the window opens to maxWindow.
+	cleanStreakToOpen = 3
+)
+
+// abortNotifications is how many times Upload sends the upload-abort
+// notification (docs/protocol.md §5.5) after an acknowledged transfer fails.
+const abortNotifications = 3
 
 // waiterBuffer bounds how many not-yet-collected replies a single expect
-// waiter holds before newer ones are dropped. It matters only for Discover,
-// whose waiter stays registered for its whole collection window while
-// several controllers may reply.
+// waiter holds before newer ones are dropped. It matters for the waiters
+// that stay registered while several replies can arrive: Discover's, while
+// several controllers may reply, and Upload's chunk-ACK waiter, which spans
+// the whole transfer while retransmitted chunks draw duplicate ACKs.
 const waiterBuffer = 32
 
 // Options configures NewClient. The zero value is valid: every field takes
@@ -127,14 +143,22 @@ type Options struct {
 	// tool query). Zero means one second.
 	ReplyTimeout time.Duration
 
-	// Retransmit is how often Upload resends an unacknowledged start or
-	// chunk packet. Zero means 100 milliseconds.
-	Retransmit time.Duration
+	// StartRetransmit is how often Upload resends an unacknowledged
+	// upload-start request. Zero means one second.
+	StartRetransmit time.Duration
 
-	// StallTimeout is how long Upload waits, retransmitting every
-	// Retransmit interval, before giving up on a start or chunk ACK with
-	// ErrNoResponse. Zero means fifteen seconds.
+	// StartTimeout is how long after the first upload-start request Upload
+	// gives up on its ACK with ErrNoResponse. Zero means five seconds.
+	StartTimeout time.Duration
+
+	// StallTimeout is how long Upload waits without any chunk ACK before
+	// giving up with ErrNoResponse. Zero means fifteen seconds.
 	StallTimeout time.Duration
+
+	// AbortInterval separates the three upload-abort notifications Upload
+	// sends after an acknowledged transfer fails. Zero means 20
+	// milliseconds.
+	AbortInterval time.Duration
 }
 
 // resolveOptions returns a copy of opts with every zero field replaced by
@@ -170,11 +194,17 @@ func resolveOptions(opts Options) Options {
 	if opts.ReplyTimeout == 0 {
 		opts.ReplyTimeout = time.Second
 	}
-	if opts.Retransmit == 0 {
-		opts.Retransmit = 100 * time.Millisecond
+	if opts.StartRetransmit == 0 {
+		opts.StartRetransmit = time.Second
+	}
+	if opts.StartTimeout == 0 {
+		opts.StartTimeout = 5 * time.Second
 	}
 	if opts.StallTimeout == 0 {
 		opts.StallTimeout = 15 * time.Second
+	}
+	if opts.AbortInterval == 0 {
+		opts.AbortInterval = 20 * time.Millisecond
 	}
 	return opts
 }
@@ -188,6 +218,9 @@ type incoming struct {
 
 // waiter is one registration made through Client.expect.
 type waiter struct {
+	// from, when set, is the controller whose IP every reply must come
+	// from; nil accepts any source.
+	from  *net.UDPAddr
 	match func(Reply) bool
 	ch    chan incoming
 }
@@ -211,12 +244,15 @@ type Client struct {
 	keepaliveInterval time.Duration
 	lostAfter         time.Duration
 	replyTimeout      time.Duration
-	retransmit        time.Duration
+	startRetransmit   time.Duration
+	startTimeout      time.Duration
 	stallTimeout      time.Duration
+	abortInterval     time.Duration
 
-	mu      sync.Mutex
-	waiters map[byte][]*waiter
-	remote  *net.UDPAddr
+	mu       sync.Mutex
+	waiters  map[byte][]*waiter
+	remote   *net.UDPAddr
+	identity Identity
 
 	statusIn  chan Status // written by the reader goroutine only
 	statusOut chan Status // written by Run only
@@ -229,11 +265,11 @@ type Client struct {
 	closeErr  error
 }
 
-// NewClient binds a single UDP socket on 0.0.0.0, trying ports
+// NewClient binds a single IPv4 UDP socket on 0.0.0.0, trying ports
 // Options.PortMin through Options.PortMax in order (like Masso Link), and
 // starts the reader goroutine. Go's net package already sets SO_BROADCAST on
-// every datagram socket, on every OS NewClient supports, so it does not set
-// it again. It returns ErrNoPort if every port in range is unavailable.
+// every IPv4 datagram socket, on every OS NewClient supports, so it does not
+// set it again. It returns ErrNoPort if every port in range is unavailable.
 func NewClient(opts Options) (*Client, error) {
 	opts = resolveOptions(opts)
 
@@ -241,7 +277,10 @@ func NewClient(opts Options) (*Client, error) {
 	var boundPort int
 	var lastErr error
 	for port := opts.PortMin; port <= opts.PortMax; port++ {
-		pc, err := opts.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", port))
+		// Not "udp": macOS lets a dual-stack socket bind beside another
+		// process's IPv4 socket on the same port, and that socket then
+		// receives the controller's replies.
+		pc, err := opts.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", port))
 		if err != nil {
 			lastErr = err
 			continue
@@ -265,8 +304,10 @@ func NewClient(opts Options) (*Client, error) {
 		keepaliveInterval: opts.KeepaliveInterval,
 		lostAfter:         opts.LostAfter,
 		replyTimeout:      opts.ReplyTimeout,
-		retransmit:        opts.Retransmit,
+		startRetransmit:   opts.StartRetransmit,
+		startTimeout:      opts.StartTimeout,
 		stallTimeout:      opts.StallTimeout,
+		abortInterval:     opts.AbortInterval,
 		waiters:           make(map[byte][]*waiter),
 		statusIn:          make(chan Status, 1),
 		statusOut:         make(chan Status, 1),
@@ -290,10 +331,17 @@ func (c *Client) Remote() *net.UDPAddr {
 	return c.remote
 }
 
-func (c *Client) setRemote(addr *net.UDPAddr) {
+func (c *Client) setConnection(addr *net.UDPAddr, id Identity) {
 	c.mu.Lock()
 	c.remote = addr
+	c.identity = id
 	c.mu.Unlock()
+}
+
+func (c *Client) connection() (*net.UDPAddr, Identity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.remote, c.identity
 }
 
 // Status returns the channel Run publishes the latest Status to. It always
@@ -336,12 +384,13 @@ func (c *Client) readLoop() {
 }
 
 // handlePacket decodes one datagram and, non-blockingly, offers it to every
-// registered waiter whose type matches and whose match function accepts it.
-// A status reply instead goes to the one-slot latest-value channel Run
-// drains. Anything undecodable, unmatched, or unwanted (no waiter, buffer
-// full, matcher rejects) is dropped with a debug log; the reader never
-// blocks on a slow or absent consumer, so duplicate and stray replies are
-// harmless.
+// registered waiter whose type matches, whose source it came from (see
+// waiter.from), and whose match function accepts it. A status reply instead
+// goes to the one-slot latest-value channel Run drains, once connected only
+// from the controller's IP (docs/protocol.md §1). Anything undecodable,
+// unmatched, or unwanted (no waiter, foreign source, buffer full, matcher
+// rejects) is dropped with a debug log; the reader never blocks on a slow or
+// absent consumer, so duplicate and stray replies are harmless.
 func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
 	reply, err := DecodeReply(pkt)
 	if err != nil {
@@ -349,6 +398,10 @@ func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
 		return
 	}
 	if st, ok := reply.(Status); ok {
+		if remote := c.Remote(); remote != nil && !sameIP(addr, remote) {
+			c.logger.Debug("masso: dropping status from a foreign source", "from", addr)
+			return
+		}
 		setLatestStatus(c.statusIn, st)
 		return
 	}
@@ -360,7 +413,7 @@ func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
 
 	delivered := false
 	for _, w := range list {
-		if !w.match(reply) {
+		if (w.from != nil && !sameIP(addr, w.from)) || !w.match(reply) {
 			continue
 		}
 		select {
@@ -373,6 +426,11 @@ func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
 	if !delivered {
 		c.logger.Debug("masso: dropping reply with no waiter or no match", "type", fmt.Sprintf("%T", reply))
 	}
+}
+
+func sameIP(addr net.Addr, want *net.UDPAddr) bool {
+	ua, ok := addr.(*net.UDPAddr)
+	return ok && ua.IP.Equal(want.IP)
 }
 
 // replyTypeOf returns the packet type byte a decoded Reply came from. Reply's
@@ -418,8 +476,8 @@ func setLatestStatus(ch chan Status, v Status) {
 // returned channel receives every matching reply, non-blockingly, until
 // cancel is called; cancel is safe to call more than once and should always
 // run, typically via defer.
-func (c *Client) expect(typ byte, match func(Reply) bool) (<-chan incoming, func()) {
-	w := &waiter{match: match, ch: make(chan incoming, waiterBuffer)}
+func (c *Client) expect(typ byte, from *net.UDPAddr, match func(Reply) bool) (<-chan incoming, func()) {
+	w := &waiter{from: from, match: match, ch: make(chan incoming, waiterBuffer)}
 	c.mu.Lock()
 	c.waiters[typ] = append(c.waiters[typ], w)
 	c.mu.Unlock()
@@ -442,7 +500,7 @@ func (c *Client) expect(typ byte, match func(Reply) bool) (<-chan incoming, func
 func anyReply(Reply) bool { return true }
 
 // must panics if err is non-nil. It exists only for codec calls in this
-// file whose error is unreachable by construction — this package always
+// package whose error is unreachable by construction — this package always
 // calls them with already-validated, size-bounded arguments — so a failure
 // here would mean a bug in this package, not a caller mistake worth
 // returning gracefully.
@@ -470,9 +528,9 @@ func mustType[T any](v any) T {
 }
 
 // send writes pkt to addr, wrapping any error as ErrSend. request and
-// sendUntilStall share it for every send they make; sendKeepalive does not,
-// since a missed keepalive is logged and tolerated rather than treated as a
-// failure worth returning.
+// Upload use it for every send they make; sendKeepalive and notifyAbort do
+// not, since a missed keepalive or abort notification is logged and
+// tolerated rather than treated as a failure worth returning.
 func (c *Client) send(pkt []byte, addr net.Addr) error {
 	if _, err := c.conn.WriteTo(pkt, addr); err != nil {
 		return fmt.Errorf("%w: %w", ErrSend, err)
@@ -481,14 +539,15 @@ func (c *Client) send(pkt []byte, addr net.Addr) error {
 }
 
 // request sends pkt to addr up to attempts times, waiting up to perAttempt
-// each time for a reply of typ satisfying match. The waiter is registered
-// before the first send, so a reply that arrives unusually fast is never
-// missed. It returns ErrNoResponse if every attempt times out.
+// each time for a reply of typ satisfying match, from from's IP unless from
+// is nil. The waiter is registered before the first send, so a reply that
+// arrives unusually fast is never missed. It returns ErrNoResponse if every
+// attempt times out.
 func (c *Client) request(
-	ctx context.Context, typ byte, match func(Reply) bool,
-	pkt []byte, addr net.Addr, perAttempt time.Duration, attempts int,
+	ctx context.Context, typ byte, from *net.UDPAddr, match func(Reply) bool,
+	pkt []byte, addr *net.UDPAddr, perAttempt time.Duration, attempts int,
 ) (Reply, error) {
-	ch, cancel := c.expect(typ, match)
+	ch, cancel := c.expect(typ, from, match)
 	defer cancel()
 
 	for range attempts {
@@ -509,56 +568,10 @@ func (c *Client) request(
 	return nil, ErrNoResponse
 }
 
-// sendUntilStall sends pkt to addr, then retransmits it every c.retransmit
-// interval until a reply of typ satisfying match arrives, ctx is canceled,
-// or c.stallTimeout elapses since the first send with nothing matching
-// received — whichever comes first. The waiter is registered before the
-// first send for the same reason as request.
-func (c *Client) sendUntilStall(
-	ctx context.Context, typ byte, match func(Reply) bool, pkt []byte, addr net.Addr,
-) (Reply, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	ch, cancel := c.expect(typ, match)
-	defer cancel()
-
-	if err := c.send(pkt, addr); err != nil {
-		return nil, err
-	}
-
-	retransmit := c.clock.NewTimer(c.retransmit)
-	// retransmit is reassigned below each time it fires, so the cleanup
-	// must read it through a closure rather than bind to today's Timer —
-	// a bare "defer retransmit.Stop()" would only ever stop the first
-	// Timer created here, leaking whichever one is current when this
-	// function returns.
-	defer func() { retransmit.Stop() }()
-	stall := c.clock.NewTimer(c.stallTimeout)
-	defer stall.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-stall.C():
-			return nil, ErrNoResponse
-		case <-retransmit.C():
-			if err := c.send(pkt, addr); err != nil {
-				return nil, err
-			}
-			retransmit = c.clock.NewTimer(c.retransmit)
-		case in := <-ch:
-			return in.reply, nil
-		}
-	}
-}
-
 // Connect unicasts a discovery request to addr — which retargets that
 // controller's replies to this client — then requests its config, each with
 // up to three attempts of Options.ReplyTimeout. On success it records addr
-// as Remote.
+// as Remote, and the identity for Tools.
 func (c *Client) Connect(ctx context.Context, addr *net.UDPAddr) (Identity, ConfigReply, error) {
 	var id Identity
 	var err error
@@ -577,12 +590,12 @@ func (c *Client) Connect(ctx context.Context, addr *net.UDPAddr) (Identity, Conf
 		return Identity{}, ConfigReply{}, fmt.Errorf("connect: config: %w", err)
 	}
 
-	c.setRemote(addr)
+	c.setConnection(addr, id)
 	return id, cfg, nil
 }
 
-func (c *Client) configRequest(ctx context.Context, addr net.Addr) (ConfigReply, error) {
-	reply, err := c.request(ctx, TypeConfig, anyReply, Config(c.clock.Now()), addr, c.replyTimeout, defaultAttempts)
+func (c *Client) configRequest(ctx context.Context, addr *net.UDPAddr) (ConfigReply, error) {
+	reply, err := c.request(ctx, TypeConfig, nil, anyReply, Config(c.clock.Now()), addr, c.replyTimeout, defaultAttempts)
 	if err != nil {
 		return ConfigReply{}, err
 	}
@@ -639,25 +652,28 @@ func (c *Client) sendKeepalive(remote net.Addr) {
 	}
 }
 
-// Tools queries tool indices 1..118 in order, three attempts of
-// Options.ReplyTimeout each. It stops, successfully, at the first empty
-// tool name or at the first index that never answers (logged at debug
-// level); either way the records collected so far are returned with a nil
-// error. It returns ErrNotConnected if called before a successful Connect.
+// Tools queries tool indices 1 through the MaxTools of the Identity the
+// last successful Connect reported (docs/protocol.md §3.1), in order, three
+// attempts of Options.ReplyTimeout each. It stops, successfully, at the
+// first empty tool name or at the first index that never answers (logged
+// at debug level); either way the records collected so far are returned
+// with a nil error. It returns ErrNotConnected if called before a
+// successful Connect.
 func (c *Client) Tools(ctx context.Context) ([]ToolRecord, error) {
-	remote := c.Remote()
+	remote, id := c.connection()
 	if remote == nil {
 		return nil, ErrNotConnected
 	}
 
 	var out []ToolRecord
-	for i := 1; i <= maxToolIndex; i++ {
-		idx := uint8(i & 0xFF) // i is bounded by maxToolIndex (118); the mask proves that to the static analyzer
+	maxTools := id.MaxTools()
+	for i := 1; i <= maxTools; i++ {
+		idx := uint8(i & 0xFF) // MaxTools is at most 118; the mask proves that to the static analyzer
 		match := func(r Reply) bool {
 			tr, ok := r.(ToolRecord)
 			return ok && tr.Index == idx
 		}
-		reply, err := c.request(ctx, TypeTool, match, ToolQuery(idx), remote, c.replyTimeout, defaultAttempts)
+		reply, err := c.request(ctx, TypeTool, remote, match, ToolQuery(idx), remote, c.replyTimeout, defaultAttempts)
 		if err != nil {
 			if errors.Is(err, ErrNoResponse) {
 				c.logger.Debug("masso: tools: index did not answer, stopping", "index", idx)
@@ -674,106 +690,4 @@ func (c *Client) Tools(ctx context.Context) ([]ToolRecord, error) {
 		out = append(out, tr)
 	}
 	return out, nil
-}
-
-// Upload sends a size-byte file named name, read from r, to the
-// controller's USB drive, one chunk of MaxChunkData bytes at a time. name
-// must satisfy ValidateFileName. progress, if non-nil, is called once with
-// (0, size) right after the start ACK and again after each chunk is
-// accepted. Only one upload runs at a time per Client; a concurrent call
-// returns ErrBusy. A zero-byte file sends only the start packet — the real
-// controller's behavior for a zero-byte upload is unconfirmed. ctx
-// cancellation returns ctx.Err(); it never aborts a transfer already
-// acknowledged as started, since that risks leaving a partial file on the
-// controller's USB drive.
-func (c *Client) Upload(
-	ctx context.Context, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
-) error {
-	if size < 0 || size > math.MaxUint32 {
-		return fmt.Errorf("%w: %d bytes", ErrFileTooLarge, size)
-	}
-	remote := c.Remote()
-	if remote == nil {
-		return ErrNotConnected
-	}
-
-	if !c.uploadMu.TryLock() {
-		return ErrBusy
-	}
-	defer c.uploadMu.Unlock()
-
-	sizeU32 := uint32(size & math.MaxUint32) // size is already checked to fit uint32 above
-	startPkt, err := UploadStart(sizeU32, name)
-	if err != nil {
-		return err
-	}
-	reply, err := c.sendUntilStall(ctx, TypeUploadStart, anyReply, startPkt, remote)
-	if err != nil {
-		return err
-	}
-	// sendUntilStall only ever delivers a reply that passed anyReply while
-	// registered for TypeUploadStart, which the reader only ever routes
-	// StartAck values to; the assertion cannot fail.
-	ack := mustType[StartAck](reply)
-	if err := ack.Err(); err != nil {
-		return err
-	}
-
-	if progress != nil {
-		progress(0, size)
-	}
-	if size == 0 {
-		return nil
-	}
-
-	// The start ACK succeeded, so the transfer is now "acknowledged as
-	// started" per this method's doc comment: ctx cancellation must no
-	// longer abort it, to avoid leaving a partial file on the controller's
-	// USB drive. context.WithoutCancel keeps the deadline-free context
-	// alive for the rest of the transfer; sendUntilStall's own stall timer
-	// still bounds how long uploadChunks can wait for an unresponsive
-	// controller.
-	return c.uploadChunks(context.WithoutCancel(ctx), remote, r, size, progress)
-}
-
-func (c *Client) uploadChunks(
-	ctx context.Context, remote net.Addr, r io.ReaderAt, size int64, progress func(sent, total int64),
-) error {
-	buf := make([]byte, MaxChunkData)
-	var sent int64
-	for idx := uint32(0); sent < size; idx++ {
-		end := min(sent+int64(MaxChunkData), size)
-		want := int(end - sent)
-		n, err := r.ReadAt(buf[:want], sent)
-		if err != nil && (!errors.Is(err, io.EOF) || n != want) {
-			return fmt.Errorf("%w: %w", ErrRead, err)
-		}
-
-		// want, and therefore n, never exceeds MaxChunkData (see end's
-		// computation above), so UploadChunk can never reject this for
-		// size; must documents and enforces that invariant.
-		chunkPkt := must(UploadChunk(idx, buf[:n]))
-
-		accepted := idx + 1
-		match := func(r Reply) bool {
-			ca, ok := r.(ChunkAck)
-			return ok && ca.Accepted == accepted
-		}
-		reply, err := c.sendUntilStall(ctx, TypeUploadChunk, match, chunkPkt, remote)
-		if err != nil {
-			return err
-		}
-		// match already asserted this is a ChunkAck for this chunk before
-		// delivering it; the assertion cannot fail.
-		ca := mustType[ChunkAck](reply)
-		if err := ca.Err(); err != nil {
-			return err
-		}
-
-		sent = end
-		if progress != nil {
-			progress(sent, size)
-		}
-	}
-	return nil
 }

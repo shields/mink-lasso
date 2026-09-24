@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestOpenDenyWriteWindows(t *testing.T) {
@@ -91,6 +93,55 @@ func TestIsRemoteWindows(t *testing.T) {
 		if got := IsRemote(tt.path); got != tt.want {
 			t.Errorf("%s: IsRemote(%q) = %v, want %v", tt.name, tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestIsHiddenWindows(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain")
+	hidden := filepath.Join(dir, "hidden")
+	system := filepath.Join(dir, "system")
+	protected := filepath.Join(dir, "protected")
+	for _, path := range []string{plain, hidden, system, protected} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+	}
+	setAttributes(t, hidden, windows.FILE_ATTRIBUTE_HIDDEN)
+	setAttributes(t, system, windows.FILE_ATTRIBUTE_SYSTEM)
+	setAttributes(t, protected, windows.FILE_ATTRIBUTE_HIDDEN|windows.FILE_ATTRIBUTE_SYSTEM)
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"plain folder", plain, false},
+		{"hidden folder", hidden, true},
+		{"system folder", system, false},
+		{"hidden system folder", protected, true},
+		{"missing", filepath.Join(dir, "missing"), false},
+		{"embedded NUL", "a\x00b", false},
+	}
+
+	for _, tt := range tests {
+		if got := IsHidden(tt.path); got != tt.want {
+			t.Errorf("%s: IsHidden(%q) = %v, want %v", tt.name, tt.path, got, tt.want)
+		}
+	}
+}
+
+func setAttributes(t *testing.T, path string, attrs uint32) {
+	t.Helper()
+
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatalf("UTF16PtrFromString: %v", err)
+	}
+	if err := windows.SetFileAttributes(p, attrs); err != nil {
+		t.Fatalf("SetFileAttributes(%q): %v", path, err)
 	}
 }
 

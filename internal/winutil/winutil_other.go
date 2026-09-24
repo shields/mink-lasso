@@ -40,6 +40,13 @@ func IsRemote(path string) bool {
 	return isUNC(path)
 }
 
+// IsHidden always reports false: only Windows has a hidden attribute, and
+// elsewhere a hidden entry is marked by a leading dot in its name, which
+// callers check themselves.
+func IsHidden(_ string) bool {
+	return false
+}
+
 // SingleInstance is a no-op everywhere but Windows: mink-lasso's GUI is
 // Windows-only, so a headless dev run under go run or go test never needs a
 // single-instance guard.

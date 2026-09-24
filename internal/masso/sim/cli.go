@@ -32,20 +32,20 @@ func Main(ctx context.Context, args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("masso-sim", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	addr := fs.String("addr", "127.0.0.1:65535", "UDP address to listen on")
-	serialFlag := fs.Uint("serial", 1, "controller serial number (0-65535)")
+	serialFlag := fs.Uint64("serial", 1, "controller serial number (0-4294967295)")
 	version := fs.String("version", "5-Axis v5.13", "firmware version string")
 	tools := fs.String("tools", "", "comma-separated tool names, index 1..n")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *serialFlag > math.MaxUint16 {
-		printf(stdout, "masso-sim: -serial %d is out of range (0-65535)\n", *serialFlag)
+	if *serialFlag > math.MaxUint32 {
+		printf(stdout, "masso-sim: -serial %d is out of range (0-4294967295)\n", *serialFlag)
 		return 2
 	}
 	// The range check above makes this conversion safe; the mask just
 	// proves that to the static analyzer, matching internal/masso's
 	// clockByte convention.
-	serial := uint16(*serialFlag & math.MaxUint16)
+	serial := uint32(*serialFlag & math.MaxUint32)
 
 	var toolNames []string
 	if *tools != "" {

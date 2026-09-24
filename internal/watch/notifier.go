@@ -47,7 +47,8 @@ const (
 	fsWindowsBufferBytes = 256 << 10
 )
 
-// NewFSNotifier watches dir, non-recursively, using fsnotify.
+// NewFSNotifier watches dir itself, not its subfolders, using fsnotify; a
+// Watcher's periodic listing covers those.
 func NewFSNotifier(dir string) (Notifier, error) {
 	return newFSNotifierWith(dir, fsnotify.NewBufferedWatcher)
 }

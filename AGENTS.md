@@ -32,6 +32,29 @@ A controller talks to one client at a time, and every discovery broadcast
 re-targets every controller that hears it. Keep broadcasts to a minimum and
 never run two clients against the same controller (that includes Masso Link).
 
+## Clean-room procedure
+
+This is a clean-room implementation, and `docs/protocol.md` is the only thing
+that may cross from Masso Link to the code. Any work that reverse-engineers
+Masso Link—its binaries, disassembly or decompilation, its embedded resources,
+captures of its traffic, or notes derived from any of those—follows two roles
+that must be held by different agents or sessions, never by one:
+
+- **Analysts** examine that material and write only `docs/protocol.md`. They
+  must not read the Go source (`internal/`, `cmd/`) or write code or tests.
+- **Implementers** write code and tests from `docs/protocol.md` alone. They must
+  not open the binaries, disassembly, decompilation, captures, or analysis
+  notes, and their brief must not quote or paraphrase them; behavior goes into
+  the document first, then the implementer reads the document.
+
+A session that coordinates both roles (spawning analysts, then implementers)
+counts as an analyst the moment it looks at any of the material itself, and must
+then delegate every code change to a fresh implementer whose prompt contains
+only the specification and the required API surface. Keep the analysis material
+outside the repository; nothing derived from Masso Link other than
+`docs/protocol.md` is committed. Say in the commit message which agent analyzed
+and which implemented.
+
 ## Windows-only code
 
 `github.com/tailscale/walk` builds only on Windows. It may be imported only from
@@ -89,5 +112,5 @@ powered down between sessions); every test skips unless `MINK_LASSO_SERIAL` is
 set, and the upload/E2E tests additionally skip while the machine is running
 unless `MINK_LASSO_ALLOW_RUNNING=1`. The E2E test needs the built exe, found via
 `MINK_LASSO_EXE` (set by the `integration` Makefile target); it skips itself if
-unset. Test files are named `MLTEST*.NC` so they are easy to find and delete on
-the controller.
+unset. Test files are named `MLTEST*.NC`, and the subfolder upload targets a
+`MLTEST` folder, so they are easy to find and delete on the controller.

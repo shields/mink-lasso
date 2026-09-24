@@ -37,14 +37,15 @@ import (
 // schedTestOptions returns Options wired for a fast, real-time scheduler
 // test: short watcher, backoff, and archive-retry intervals alongside
 // conn_test.go's short connection timeouts.
-func schedTestOptions(serial uint16, watchDir string) Options {
+func schedTestOptions(serial uint32, watchDir string) Options {
 	opts := connTestOptions(serial)
 	opts.Config.WatchDir = watchDir
-	// Upload's own stall/retransmit timing defaults to 15s/100ms, which
+	// Upload's own start and stall timing defaults to seconds, which
 	// would make a silent-controller scenario take far too long for a
-	// test; short-circuit both.
+	// test; short-circuit it.
 	opts.ClientOptions.StallTimeout = 150 * time.Millisecond
-	opts.ClientOptions.Retransmit = 15 * time.Millisecond
+	opts.ClientOptions.StartRetransmit = 15 * time.Millisecond
+	opts.ClientOptions.StartTimeout = 150 * time.Millisecond
 	opts.Config.ScanInterval = config.Duration(20 * time.Millisecond)
 	opts.Config.SettleDelay = config.Duration(30 * time.Millisecond)
 	opts.Backoff = []time.Duration{60 * time.Millisecond, 100 * time.Millisecond}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // Reply is implemented by every decoded controller-to-client reply:
@@ -39,15 +40,29 @@ const (
 	chunkAckLen    = 10
 )
 
-// versionMarker is the '@' byte that precedes the version string in an
-// Identity reply; locating it this way is robust across firmware versions
-// (docs/protocol.md §3.1).
-const versionMarker = 0x40
+// Identity reply layout (docs/protocol.md §3.1): the version string starts
+// at a fixed offset and is never read past byte 41.
+const (
+	versionStart = 13
+	versionEnd   = 42
+)
+
+// identityByte12 is byte 12 of the identity reply as the captured firmware
+// sends it. Its meaning is unknown and nothing decodes it.
+const identityByte12 = 0x40
+
+// Tool-table ceilings from docs/protocol.md §3.1.
+const (
+	smallSerialMax      = 5000
+	smallSerialMaxTools = 32
+	latheMaxTools       = 100
+	defaultMaxTools     = 118
+)
 
 // Identity is the 46-byte reply to a discovery request (TypeDiscovery).
 type Identity struct {
 	// Serial is the controller's serial number.
-	Serial uint16
+	Serial uint32
 	// Version is the firmware version string (for example
 	// "5-Axis v5.13").
 	Version string
@@ -55,22 +70,37 @@ type Identity struct {
 
 func (Identity) isReply() {}
 
-// Encode returns the 46-byte wire form of r.
+// Encode returns the 46-byte wire form of r. A Version longer than the
+// field is truncated.
 func (r Identity) Encode() []byte {
 	pkt := make([]byte, identityLen)
 	pkt[2], pkt[3] = magic[0], magic[1]
 	pkt[4] = TypeDiscovery
-	binary.LittleEndian.PutUint16(pkt[5:7], r.Serial)
-	pkt[12] = versionMarker
-	putCString(pkt[13:], r.Version)
+	binary.LittleEndian.PutUint32(pkt[5:9], r.Serial)
+	pkt[12] = identityByte12
+	copy(pkt[versionStart:versionEnd], r.Version)
 	binary.LittleEndian.PutUint16(pkt[0:2], crc16XModem(pkt[2:]))
 	return pkt
+}
+
+// MaxTools returns the highest tool index worth querying on this
+// controller: 32 for a serial of 5000 or less, otherwise 100 for a version
+// string containing "Lathe" in any case, otherwise 118.
+func (r Identity) MaxTools() int {
+	switch {
+	case r.Serial <= smallSerialMax:
+		return smallSerialMaxTools
+	case strings.Contains(strings.ToLower(r.Version), "lathe"):
+		return latheMaxTools
+	default:
+		return defaultMaxTools
+	}
 }
 
 // ConfigReply is the 10-byte reply to a config (handshake) request
 // (TypeConfig).
 type ConfigReply struct {
-	// Serial is the controller's serial number.
+	// Serial is the low 16 bits of the controller's serial number.
 	Serial uint16
 }
 
@@ -86,6 +116,10 @@ func (r ConfigReply) Encode() []byte {
 	binary.LittleEndian.PutUint16(pkt[0:2], crc16XModem(pkt[2:]))
 	return pkt
 }
+
+// statusFileStart is the offset of the status reply's current-file name,
+// which occupies at most MaxStatusFile bytes (docs/protocol.md §4).
+const statusFileStart = 17
 
 // runStateRunning and promptWaiting are the only documented values of the
 // Status.State and Status.Prompt bytes (docs/protocol.md §4).
@@ -115,13 +149,15 @@ type Status struct {
 	WaitingForOperator bool
 	// Line is the current program line number.
 	Line uint32
-	// File is the current file name, empty when idle.
+	// File is the current file name, empty when idle; at most
+	// MaxStatusFile bytes.
 	File string
 }
 
 func (Status) isReply() {}
 
-// Encode returns the 270-byte wire form of r.
+// Encode returns the 270-byte wire form of r. A File longer than
+// MaxStatusFile is truncated.
 func (r Status) Encode() []byte {
 	pkt := make([]byte, statusLen)
 	pkt[2], pkt[3] = magic[0], magic[1]
@@ -132,7 +168,7 @@ func (r Status) Encode() []byte {
 	binary.LittleEndian.PutUint32(pkt[8:12], r.Jobs)
 	pkt[12] = r.Prompt
 	binary.LittleEndian.PutUint32(pkt[13:17], r.Line)
-	putCString(pkt[17:], r.File)
+	copy(pkt[statusFileStart:statusFileStart+MaxStatusFile], r.File)
 	binary.LittleEndian.PutUint16(pkt[0:2], crc16XModem(pkt[2:]))
 	return pkt
 }
@@ -164,13 +200,19 @@ const (
 	StartOK = 0x00
 	// StartNoUSB indicates no USB flash drive is connected.
 	StartNoUSB = 0xE9
+	// StartAlreadyStarted means success only in reply to a start request
+	// the client has resent: an earlier attempt already started the
+	// upload. In reply to a first attempt it is a generic transfer error,
+	// which is how StartAck.Err treats it; Client.Upload decides when to
+	// accept it.
+	StartAlreadyStarted = 0xF7
 )
 
 // StartAck is the 10-byte reply to an upload-start request
 // (TypeUploadStart).
 type StartAck struct {
-	// Result is the raw result byte; see StartOK and StartNoUSB. Any
-	// other value is a generic transfer error.
+	// Result is the raw result byte; see StartOK, StartNoUSB, and
+	// StartAlreadyStarted. Any other value is a generic transfer error.
 	Result byte
 }
 
@@ -186,7 +228,8 @@ func (a StartAck) Encode() []byte {
 	return pkt
 }
 
-// Err maps a.Result to a sentinel error, or nil for StartOK.
+// Err maps a.Result to a sentinel error, or nil for StartOK. It maps
+// StartAlreadyStarted to ErrTransfer.
 func (a StartAck) Err() error {
 	switch a.Result {
 	case StartOK:
@@ -312,13 +355,10 @@ func decodeIdentity(pkt []byte) (Reply, error) {
 	if len(pkt) != identityLen {
 		return nil, fmt.Errorf("%w: identity reply", ErrBadLength)
 	}
-	serial := binary.LittleEndian.Uint16(pkt[5:7])
-	idx := bytes.IndexByte(pkt[7:], versionMarker)
-	if idx < 0 {
-		return nil, fmt.Errorf("%w: identity reply missing version marker", ErrMalformed)
-	}
-	start := 7 + idx + 1
-	return Identity{Serial: serial, Version: cString(pkt[start:])}, nil
+	return Identity{
+		Serial:  binary.LittleEndian.Uint32(pkt[5:9]),
+		Version: cString(pkt[versionStart:versionEnd]),
+	}, nil
 }
 
 func decodeStatus(pkt []byte) Reply {
@@ -330,7 +370,7 @@ func decodeStatus(pkt []byte) Reply {
 		Prompt:             pkt[12],
 		WaitingForOperator: pkt[12] == promptWaiting,
 		Line:               binary.LittleEndian.Uint32(pkt[13:17]),
-		File:               cString(pkt[17:]),
+		File:               cString(pkt[statusFileStart : statusFileStart+MaxStatusFile]),
 	}
 }
 

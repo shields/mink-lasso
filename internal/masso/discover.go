@@ -41,7 +41,7 @@ type Found struct {
 // collecting replies, Discover returns what it has found so far along with
 // ctx.Err().
 func (c *Client) Discover(ctx context.Context, timeout time.Duration) ([]Found, error) {
-	ch, cancel := c.expect(TypeDiscovery, anyReply)
+	ch, cancel := c.expect(TypeDiscovery, nil, anyReply)
 	defer cancel()
 
 	if err := c.sendDiscoveryBroadcast(); err != nil {
@@ -84,7 +84,7 @@ func (c *Client) Discover(ctx context.Context, timeout time.Duration) ([]Found, 
 // that controller's replies to this client — and waits up to timeout for
 // its identity reply.
 func (c *Client) DiscoverAt(ctx context.Context, addr *net.UDPAddr, timeout time.Duration) (Identity, error) {
-	reply, err := c.request(ctx, TypeDiscovery, anyReply, Discovery(c.LocalPort()), addr, timeout, 1)
+	reply, err := c.request(ctx, TypeDiscovery, nil, anyReply, Discovery(c.LocalPort()), addr, timeout, 1)
 	if err != nil {
 		return Identity{}, err
 	}

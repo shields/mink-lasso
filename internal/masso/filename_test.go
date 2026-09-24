@@ -76,3 +76,51 @@ func TestValidateFileNameMaxLength(t *testing.T) {
 		t.Errorf("ValidateFileName(%d-char name): err = %v, want ErrBadFileName", MaxFileName+1, err)
 	}
 }
+
+func TestValidateUploadDirValid(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"",
+		"JOBS",
+		`JOBS\SUB`,
+		"a very long folder name, longer than fifteen",
+		`A\B\C\D`,
+		strings.Repeat("D", MaxUploadDir),
+	}
+	for _, dir := range tests {
+		if err := ValidateUploadDir(dir); err != nil {
+			t.Errorf("ValidateUploadDir(%q): unexpected error: %v", dir, err)
+		}
+	}
+}
+
+func TestValidateUploadDirInvalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		dir    string
+		reason string
+	}{
+		{`\`, "bare separator"},
+		{`\JOBS`, "leading backslash"},
+		{`JOBS\`, "trailing backslash"},
+		{`JOBS\\SUB`, "doubled backslash"},
+		{`JOBS\.`, "reserved current-directory component"},
+		{`..\JOBS`, "reserved parent-directory component"},
+		{"JOBS/SUB", "forward slash"},
+		{"C:JOBS", "colon"},
+		{"JO\tBS", "control character (tab)"},
+		{"café", "non-ASCII byte"},
+		{strings.Repeat("D", MaxUploadDir+1), "one byte too long"},
+	}
+	for _, tt := range tests {
+		err := ValidateUploadDir(tt.dir)
+		if !errors.Is(err, ErrBadUploadDir) {
+			t.Errorf("ValidateUploadDir(%q) [%s]: err = %v, want ErrBadUploadDir", tt.dir, tt.reason, err)
+		}
+		if errors.Is(err, ErrBadFileName) {
+			t.Errorf("ValidateUploadDir(%q) [%s]: err = %v also wraps ErrBadFileName", tt.dir, tt.reason, err)
+		}
+	}
+}

@@ -39,6 +39,7 @@
 // # File naming
 //
 // Every file this suite writes to the controller's USB drive is named
-// MLTEST<n>.NC, so they are easy to find and delete from the controller
-// afterward; nothing else on the drive should match that pattern.
+// MLTEST<n>.NC, and the subfolder upload writes into an MLTEST folder at the
+// drive root, so both are easy to find and delete from the controller
+// afterward; nothing else on the drive should match those names.
 package integration

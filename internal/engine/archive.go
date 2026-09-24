@@ -22,25 +22,24 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"msrl.dev/mink-lasso/internal/watch"
 )
 
-// sentDirName is the append-only archive subfolder inside WatchDir. It is
-// never a watch candidate itself (the watcher is non-recursive).
-const sentDirName = "sent"
-
-// archiveTimestampLayout names a superseded sent/NAME backup uniquely down
+// archiveTimestampLayout names a superseded backup in sent/ uniquely down
 // to the second; a further collision (two sends within the same second)
 // gets a "-N" suffix from uniqueBackupName.
 const archiveTimestampLayout = "20060102-150405"
 
-// archiveSent is called after a successful upload for a non-manual item: it
-// moves the file into WatchDir/sent, preserving any existing file under
-// that name by renaming it aside first with a timestamp, and retries the
-// whole move on failure before giving up and reporting SentUnfiled. A
+// archiveSent is called after a successful upload of src for a non-manual
+// item: it moves the file into src.root's sent folder (watch.SentDir),
+// under the same subfolder it was found in, preserving any existing file
+// under that name by renaming it aside first with a timestamp, and retries
+// the whole move on failure before giving up and reporting SentUnfiled. A
 // manual send (SendFile) is never archived.
-func (s *scheduler) archiveSent(ctx context.Context, it *item) {
+func (s *scheduler) archiveSent(ctx context.Context, it *item, src sendSource) {
 	s.mu.Lock()
-	manual, name, path := it.manual, it.name, it.path
+	manual, name := it.manual, it.name
 	s.mu.Unlock()
 
 	if manual {
@@ -48,9 +47,9 @@ func (s *scheduler) archiveSent(ctx context.Context, it *item) {
 		return
 	}
 
-	dir := filepath.Dir(path)
-	sentDir := filepath.Join(dir, sentDirName)
-	dest := filepath.Join(sentDir, name)
+	sentDir := filepath.Join(src.root, watch.SentDir, src.dir)
+	dest := filepath.Join(sentDir, src.base)
+	path := src.path
 
 	var lastErr error
 	for attempt := 0; attempt <= s.e.opts.MoveRetries; attempt++ {
@@ -71,9 +70,9 @@ func (s *scheduler) archiveSent(ctx context.Context, it *item) {
 	s.setTerminal(it, SentUnfiled, fmt.Sprintf("File sent, but could not move it to sent/: %v", lastErr))
 }
 
-// moveIntoSent performs one attempt of the archive move: create sentDir,
-// rename any existing dest aside under a timestamped name, then rename path
-// into dest.
+// moveIntoSent performs one attempt of the archive move: create sentDir and
+// any missing folders above it, rename any existing dest aside under a
+// timestamped name, then rename path into dest.
 func (s *scheduler) moveIntoSent(sentDir, dest, path string) error {
 	if err := s.e.opts.MkdirAll(sentDir, 0o755); err != nil {
 		return fmt.Errorf("engine: create sent dir: %w", err)

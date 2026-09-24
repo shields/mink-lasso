@@ -66,7 +66,7 @@ func TestReadyClearsManualFromPreviousSendFile(t *testing.T) {
 	e := newUnitTestEngine(t, nil)
 	e.scheduler.items["A.NC"] = &item{name: "A.NC", state: Sent, manual: true}
 
-	e.scheduler.ready(watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 1})
+	e.scheduler.ready("/watch", watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 1})
 
 	e.scheduler.mu.Lock()
 	it := e.scheduler.items["A.NC"]
@@ -90,7 +90,7 @@ func TestReadyDuringSendPreservesManualForResend(t *testing.T) {
 	e := newUnitTestEngine(t, nil)
 	e.scheduler.items["A.NC"] = &item{name: "A.NC", state: Sending, sending: true, manual: true}
 
-	e.scheduler.ready(watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 2})
+	e.scheduler.ready("/watch", watch.File{Name: "A.NC", Path: "/watch/A.NC", Size: 2})
 
 	e.scheduler.mu.Lock()
 	it := e.scheduler.items["A.NC"]
@@ -107,7 +107,8 @@ func TestReadyDuringSendPreservesManualForResend(t *testing.T) {
 func TestOpenForSendBadName(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, nil)
-	it := &item{name: "this-name-is-way-too-long-for-masso.nc", path: "/dev/null"}
+	const name = "this-name-is-way-too-long-for-masso.nc"
+	it := &item{name: name, base: name, path: "/dev/null"}
 	if _, _, err := e.scheduler.openForSend(it); !errors.Is(err, masso.ErrBadFileName) {
 		t.Errorf("openForSend error = %v, want ErrBadFileName", err)
 	}
@@ -117,7 +118,7 @@ func TestOpenForSendOpenError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("simulated open failure")
 	e := newUnitTestEngine(t, func(string) (*os.File, error) { return nil, wantErr })
-	it := &item{name: "A.NC", path: "/does/not/matter"}
+	it := &item{name: "A.NC", base: "A.NC", path: "/does/not/matter"}
 	if _, _, err := e.scheduler.openForSend(it); !errors.Is(err, wantErr) {
 		t.Errorf("openForSend error = %v, want %v", err, wantErr)
 	}
@@ -140,7 +141,7 @@ func TestOpenForSendStatError(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	e := newUnitTestEngine(t, func(string) (*os.File, error) { return f, nil })
-	it := &item{name: "A.NC", path: path}
+	it := &item{name: "A.NC", base: "A.NC", path: path}
 	if _, _, err := e.scheduler.openForSend(it); err == nil {
 		t.Error("openForSend error = nil, want a Stat error on an already-closed file")
 	}
@@ -370,7 +371,7 @@ func TestCompareItemsManualTieBreak(t *testing.T) {
 type closeDuringUploadClient struct{ fakeClient }
 
 func (closeDuringUploadClient) Upload(
-	_ context.Context, _ string, r io.ReaderAt, _ int64, _ func(int64, int64),
+	_ context.Context, _, _ string, r io.ReaderAt, _ int64, _ func(int64, int64),
 ) error {
 	if f, ok := r.(*os.File); ok {
 		_ = f.Close()
@@ -387,7 +388,7 @@ func TestSendOneCloseAfterSendLogsError(t *testing.T) {
 	}
 	e := newUnitTestEngine(t, os.Open)
 	e.client = closeDuringUploadClient{}
-	it := &item{name: "A.NC", path: path, state: Pending}
+	it := &item{name: "A.NC", root: dir, base: "A.NC", path: path, state: Pending}
 	e.scheduler.items["A.NC"] = it
 
 	// sendOne must not panic despite Upload closing the file first; the
@@ -398,7 +399,7 @@ func TestSendOneCloseAfterSendLogsError(t *testing.T) {
 func TestSendOnePreflightFailure(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, func(string) (*os.File, error) { return nil, fs.ErrNotExist })
-	it := &item{name: "A.NC", path: "/does/not/exist", state: Pending}
+	it := &item{name: "A.NC", base: "A.NC", path: "/does/not/exist", state: Pending}
 	e.scheduler.items["A.NC"] = it
 
 	e.scheduler.sendOne(context.Background(), it)
@@ -442,7 +443,7 @@ func TestSendOneClosesFileBeforeArchiving(t *testing.T) {
 		return os.Rename(oldpath, newpath)
 	}
 
-	it := &item{name: "A.NC", path: path, state: Pending}
+	it := &item{name: "A.NC", root: dir, base: "A.NC", path: path, state: Pending}
 	e.scheduler.items["A.NC"] = it
 	e.scheduler.sendOne(context.Background(), it)
 
@@ -520,7 +521,7 @@ func TestClearNonManualPreservesSendingItemThenDropsQueuedResend(t *testing.T) {
 
 	// Simulate the watcher's Changed re-emission arriving while the send
 	// is in flight: ready() sets resendAfter because it.sending is true.
-	e.scheduler.ready(watch.File{Name: "F.NC", Path: "/does/not/matter", Size: 2})
+	e.scheduler.ready("/watch", watch.File{Name: "F.NC", Path: "/does/not/matter", Size: 2})
 	if !it.resendAfter {
 		t.Fatal("resendAfter not set by ready() on a Sending item")
 	}
@@ -542,7 +543,7 @@ func TestClearNonManualPreservesSendingItemThenDropsQueuedResend(t *testing.T) {
 	// rather than re-arm it to Pending for the stale resend, since the
 	// folder it points at is no longer the configured watch dir.
 	s := e.scheduler
-	s.finishSend(context.Background(), it, nil, "")
+	s.finishSend(context.Background(), it, sendSource{}, nil, "")
 
 	s.mu.Lock()
 	_, stillThere = s.items["F.NC"]
@@ -578,7 +579,7 @@ func TestClearNonManualPreservesSendingItemThenDropsWithNoResend(t *testing.T) {
 	}
 
 	s := e.scheduler
-	s.finishSend(context.Background(), it, errors.New("simulated failure"), "simulated failure")
+	s.finishSend(context.Background(), it, sendSource{}, errors.New("simulated failure"), "simulated failure")
 
 	s.mu.Lock()
 	_, stillThere = s.items["G.NC"]

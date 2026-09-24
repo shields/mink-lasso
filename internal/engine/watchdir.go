@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"msrl.dev/mink-lasso/internal/masso"
@@ -70,7 +71,8 @@ func (e *Engine) runWatchAttempt(ctx context.Context) {
 		Interval:   time.Duration(e.opts.Config.ScanInterval),
 		Settle:     time.Duration(e.opts.Config.SettleDelay),
 		Extensions: e.opts.Config.Extensions,
-		Validate:   masso.ValidateFileName,
+		Validate:   validateUpload,
+		Hidden:     winutil.IsHidden,
 		Probe:      e.probeOpen,
 		IsRemote:   e.opts.IsRemote,
 		Clock:      e.opts.Clock,
@@ -99,9 +101,9 @@ func (e *Engine) runWatchAttempt(ctx context.Context) {
 			case <-attemptCtx.Done():
 				return
 			case f := <-w.Ready():
-				e.scheduler.ready(f)
+				e.scheduler.ready(dir, f)
 			case r := <-w.Rejected():
-				e.scheduler.rejected(r)
+				e.scheduler.rejected(dir, r)
 			}
 		}
 	}()
@@ -114,6 +116,42 @@ func (e *Engine) runWatchAttempt(ctx context.Context) {
 		e.opts.Logger.Debug("engine: watcher stopped", "dir", dir, "error", err)
 	}
 	<-done
+}
+
+func validateUpload(dir, name string) error {
+	_, err := uploadTarget(dir, name)
+	return err
+}
+
+// uploadTarget checks that the controller can take a file named name in
+// the OS-native folder dir relative to the watch folder, and returns the
+// controller folder it is uploaded into.
+func uploadTarget(dir, name string) (string, error) {
+	if err := masso.ValidateFileName(name); err != nil {
+		return "", err
+	}
+	return uploadDir(dir)
+}
+
+// uploadDir converts a watcher's OS-native folder, relative to the watch
+// folder, to the controller's backslash-separated form, "" for the drive
+// root.
+func uploadDir(dir string) (string, error) {
+	return toUploadDir(dir, filepath.Separator)
+}
+
+// toUploadDir is uploadDir for a filesystem whose separator is sep. Where
+// sep is not a backslash, a backslash can only be part of a folder's name,
+// which the controller has no way to represent.
+func toUploadDir(dir string, sep rune) (string, error) {
+	if sep != '\\' && strings.ContainsRune(dir, '\\') {
+		return "", fmt.Errorf("%w: %q has a folder name containing a backslash", masso.ErrBadUploadDir, dir)
+	}
+	remote := strings.ReplaceAll(dir, string(sep), `\`)
+	if err := masso.ValidateUploadDir(remote); err != nil {
+		return "", err
+	}
+	return remote, nil
 }
 
 // probeOpen reports a file busy for winutil.ErrBusy from opts.Open, closing
@@ -164,17 +202,20 @@ func (e *Engine) SetWatchDir(dir string) error {
 	return nil
 }
 
-// Retry re-queues a Failed, Rejected, or SentUnfiled file immediately.
-// Unknown names are ignored with a log line.
+// Retry re-queues a Failed, Rejected, or SentUnfiled file immediately;
+// name is its TransferEvent.Name. Unknown names are ignored with a log
+// line.
 func (e *Engine) Retry(name string) {
 	e.scheduler.retry(name)
 }
 
-// SendFile validates name, opens path deny-write to get its authoritative
-// size, and queues it at the front of the queue as a manual send: subject
-// to the machine gate like any other file, but never archived, and
-// reported with Manual: true. It returns the validation or open error
-// immediately so the caller can show it without waiting for the queue.
+// SendFile validates path's base name, opens path deny-write to get its
+// authoritative size, and queues it at the front of the queue as a manual
+// send to the controller's drive root, named by that base name wherever
+// path is: subject to the machine gate like any other file, but never
+// archived, and reported with Manual: true. It returns the validation or
+// open error immediately so the caller can show it without waiting for the
+// queue.
 func (e *Engine) SendFile(path string) error {
 	name := filepath.Base(path)
 	if err := masso.ValidateFileName(name); err != nil {

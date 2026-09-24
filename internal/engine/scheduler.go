@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -41,7 +42,14 @@ const (
 // also written from the watcher-forwarding goroutine and from Retry/
 // SendFile, so it lives behind scheduler.mu.
 type item struct {
+	// name is the map key and TransferEvent.Name: the file's path
+	// relative to root, the watch folder it came from, or its base name
+	// for a manual send (whose root is ""). dir and base are that path's
+	// OS-native folder ("" for the root) and base name.
 	name    string
+	root    string
+	dir     string
+	base    string
 	path    string
 	size    int64
 	modTime time.Time
@@ -103,17 +111,14 @@ func (s *scheduler) poke() {
 	}
 }
 
-// ready folds in a watcher Ready file: a brand new name enters as Pending;
-// a resend of the name currently Sending is deferred until it finishes;
-// anything else just has its size/mtime refreshed and its failure state
-// cleared — the Changed re-emission the package doc describes.
-func (s *scheduler) ready(f watch.File) {
+// ready folds in a Ready file from the watcher on root: a brand new name
+// enters as Pending; a resend of the name currently Sending is deferred
+// until it finishes; anything else just has its size/mtime refreshed and
+// its failure state cleared — the Changed re-emission the package doc
+// describes.
+func (s *scheduler) ready(root string, f watch.File) {
 	s.mu.Lock()
-	it, ok := s.items[f.Name]
-	if !ok {
-		it = &item{name: f.Name}
-		s.items[f.Name] = it
-	}
+	it := s.itemLocked(root, f.Dir, f.Name)
 	it.path = f.Path
 	it.size = f.Size
 	it.modTime = f.ModTime
@@ -138,15 +143,11 @@ func (s *scheduler) ready(f watch.File) {
 	s.poke()
 }
 
-// rejected records a watcher Rejected name as a terminal Rejected transfer;
-// it is never retried automatically.
-func (s *scheduler) rejected(r watch.Rejected) {
+// rejected records a Rejected file from the watcher on root as a terminal
+// Rejected transfer; it is never retried automatically.
+func (s *scheduler) rejected(root string, r watch.Rejected) {
 	s.mu.Lock()
-	it, ok := s.items[r.Name]
-	if !ok {
-		it = &item{name: r.Name}
-		s.items[r.Name] = it
-	}
+	it := s.itemLocked(root, r.Dir, r.Name)
 	it.path = r.Path
 	it.state = Rejected
 	it.message = r.Reason
@@ -155,6 +156,22 @@ func (s *scheduler) rejected(r watch.Rejected) {
 	s.mu.Unlock()
 
 	s.e.dispatcher.emit(ev)
+}
+
+// itemLocked returns the item for base in the folder dir under the watch
+// folder root, creating it if need be, with its location set. An orphaned
+// item is replaced rather than reused: it still belongs to the watch folder
+// SetWatchDir moved away from, and will archive and drop itself once its
+// send settles. Callers must hold s.mu.
+func (s *scheduler) itemLocked(root, dir, base string) *item {
+	name := filepath.Join(dir, base)
+	it, ok := s.items[name]
+	if !ok || it.orphaned {
+		it = &item{name: name}
+		s.items[name] = it
+	}
+	it.root, it.dir, it.base = root, dir, base
+	return it
 }
 
 // clearNonManual drops every non-manual entry, used when SetWatchDir
@@ -198,20 +215,17 @@ func (s *scheduler) retry(name string) {
 	s.poke()
 }
 
-// sendFile queues path as a manual send: never archived, always reported
-// with Manual: true. If name is currently Sending, the map's existing
-// *item (which sendOne/finishSend hold directly) is updated in place and
-// marked for a resend once that transfer finishes — mirroring ready() —
-// rather than replaced outright: replacing the map entry would orphan the
-// in-flight item, whose completion would still archive the file out from
-// under this manual request with no visible error (see finding 2).
+// sendFile queues path as a manual send to the drive root under its base
+// name: never archived, always reported with Manual: true. If name is
+// currently Sending, the map's existing *item (which sendOne/finishSend
+// hold directly) is updated in place and marked for a resend once that
+// transfer finishes — mirroring ready() — rather than replaced outright:
+// replacing the map entry would orphan the in-flight item, whose
+// completion would still archive the file out from under this manual
+// request with no visible error.
 func (s *scheduler) sendFile(name, path string, size int64, modTime time.Time) {
 	s.mu.Lock()
-	it, ok := s.items[name]
-	if !ok {
-		it = &item{name: name}
-		s.items[name] = it
-	}
+	it := s.itemLocked("", "", name)
 	it.path = path
 	it.size = size
 	it.modTime = modTime
@@ -395,14 +409,14 @@ func compareItems(a, b *item) int {
 // sendOne runs one upload attempt for it to completion (success or
 // failure) and folds the result back into the queue.
 func (s *scheduler) sendOne(ctx context.Context, it *item) {
-	f, size, err := s.openForSend(it)
+	f, src, err := s.openForSend(it)
 	if err != nil {
 		s.preflightFailed(it, err)
 		return
 	}
 
 	s.mu.Lock()
-	it.size = size
+	it.size = src.size
 	it.state = Sending
 	it.message = msgSending
 	ev := s.event(it)
@@ -429,7 +443,7 @@ func (s *scheduler) sendOne(ctx context.Context, it *item) {
 		})
 	}
 
-	uploadErr := s.e.client.Upload(ctx, it.name, f, size, progress)
+	uploadErr := s.e.client.Upload(ctx, src.remoteDir, src.base, f, src.size, progress)
 
 	// f must be closed before finishSend can archive it: on Windows,
 	// opts.Open (winutil.OpenDenyWrite) holds a share-mode handle that
@@ -448,35 +462,52 @@ func (s *scheduler) sendOne(ctx context.Context, it *item) {
 			failMsg = wording.acked
 		}
 	}
-	s.finishSend(ctx, it, uploadErr, failMsg)
+	s.finishSend(ctx, it, src, uploadErr, failMsg)
 }
 
-// openForSend opens the file deny-write, stats it for the authoritative
-// size, and re-validates the name, all immediately before uploading.
-func (s *scheduler) openForSend(it *item) (*os.File, int64, error) {
+// sendSource is one send attempt's snapshot of where its item's file is —
+// base in the OS-native folder dir under the watch folder root, at path —
+// along with its size when opened and remoteDir, the controller folder it
+// is uploaded into. Archiving uses this snapshot rather than the item,
+// which a later watcher event may already have pointed somewhere else.
+type sendSource struct {
+	root, dir, base, path string
+	size                  int64
+	remoteDir             string
+}
+
+// openForSend re-validates the file's name and folder, opens it deny-write,
+// and stats it for the authoritative size, all immediately before
+// uploading.
+func (s *scheduler) openForSend(it *item) (*os.File, sendSource, error) {
 	s.mu.Lock()
-	name, path := it.name, it.path
+	name := it.name
+	src := sendSource{root: it.root, dir: it.dir, base: it.base, path: it.path}
 	s.mu.Unlock()
 
-	if err := masso.ValidateFileName(name); err != nil {
-		return nil, 0, err
-	}
-	f, err := s.e.opts.Open(path)
+	remoteDir, err := uploadTarget(src.dir, src.base)
 	if err != nil {
-		return nil, 0, err
+		return nil, sendSource{}, err
+	}
+	src.remoteDir = remoteDir
+	f, err := s.e.opts.Open(src.path)
+	if err != nil {
+		return nil, sendSource{}, err
 	}
 	info, err := f.Stat()
 	if err != nil {
 		if closeErr := f.Close(); closeErr != nil {
 			s.e.opts.Logger.Warn("engine: close file after failed stat", "name", name, "error", closeErr)
 		}
-		return nil, 0, err
+		return nil, sendSource{}, err
 	}
-	return f, info.Size(), nil
+	src.size = info.Size()
+	return f, src, nil
 }
 
 // preflightFailed handles an error from openForSend: a vanished file is
-// forgotten entirely; anything else (most commonly ErrBusy) leaves the item
+// forgotten entirely; a name or folder the controller cannot take is
+// Rejected again; anything else (most commonly ErrBusy) leaves the item
 // Pending, retried on the next watcher emission or after Backoff[0].
 func (s *scheduler) preflightFailed(it *item, err error) {
 	s.mu.Lock()
@@ -496,8 +527,18 @@ func (s *scheduler) preflightFailed(it *item, err error) {
 		// drop it exactly as finishSend does, rather than resurrecting
 		// it as a live Pending candidate pointing at a path the watch
 		// folder already moved away from.
-		delete(s.items, it.name)
+		s.dropOrphanLocked(it)
 		s.mu.Unlock()
+		return
+	}
+
+	if errors.Is(err, masso.ErrBadFileName) || errors.Is(err, masso.ErrBadUploadDir) {
+		it.state = Rejected
+		it.message = err.Error()
+		it.nextAttempt = time.Time{}
+		ev := s.event(it)
+		s.mu.Unlock()
+		s.e.dispatcher.emit(ev)
 		return
 	}
 
@@ -519,11 +560,11 @@ func (s *scheduler) preflightFailed(it *item, err error) {
 }
 
 // finishSend folds an upload attempt's outcome back into the queue: archive
-// on success, record the failure on failure (failMsg is the caller's
+// src on success, record the failure on failure (failMsg is the caller's
 // already-resolved wording — see failureMessage — and is ignored when
 // uploadErr is nil), then — if a Changed arrived mid-transfer — immediately
 // re-queue for a resend.
-func (s *scheduler) finishSend(ctx context.Context, it *item, uploadErr error, failMsg string) {
+func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, uploadErr error, failMsg string) {
 	s.mu.Lock()
 	resend := it.resendAfter
 	it.resendAfter = false
@@ -551,7 +592,7 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, uploadErr error, f
 		// send of a given name.
 		s.setTerminal(it, Sent, "File sent")
 	default:
-		s.archiveSent(ctx, it)
+		s.archiveSent(ctx, it, src)
 	}
 
 	// Only a successful send earns an immediate re-arm to Pending: a
@@ -573,7 +614,7 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, uploadErr error, f
 		// candidate pointing at that stale path (see finding 4) — drop it
 		// instead, exactly as the non-resend path already does below.
 		if it.orphaned {
-			delete(s.items, it.name)
+			s.dropOrphanLocked(it)
 			s.mu.Unlock()
 			return
 		}
@@ -595,9 +636,17 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, uploadErr error, f
 	s.mu.Lock()
 	it.sending = false
 	if it.orphaned {
-		delete(s.items, it.name)
+		s.dropOrphanLocked(it)
 	}
 	s.mu.Unlock()
+}
+
+// dropOrphanLocked removes an orphaned item from the queue, unless
+// itemLocked has already replaced it there. Callers must hold s.mu.
+func (s *scheduler) dropOrphanLocked(it *item) {
+	if s.items[it.name] == it {
+		delete(s.items, it.name)
+	}
 }
 
 // recordFailure applies the backoff schedule (or disables auto-retry for

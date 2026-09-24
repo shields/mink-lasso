@@ -263,7 +263,7 @@ func TestUpload_RetransmitOfAcceptedChunkIsIdempotent(t *testing.T) {
 	client := newClient(t)
 	data := []byte("a whole file that fits in one chunk")
 
-	startPkt, err := masso.UploadStart(uint32(len(data)), "R.NC")
+	startPkt, err := masso.UploadStart(uint32(len(data)), "", "R.NC")
 	if err != nil {
 		t.Fatalf("UploadStart: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestUpload_OutOfOrderChunkDoesNotAdvance(t *testing.T) {
 	ctrl := newController(t, sim.Options{})
 	client := newClient(t)
 
-	startPkt, err := masso.UploadStart(300, "OO.NC")
+	startPkt, err := masso.UploadStart(300, "", "OO.NC")
 	if err != nil {
 		t.Fatalf("UploadStart: %v", err)
 	}
