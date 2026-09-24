@@ -32,13 +32,17 @@ import (
 //
 // Upload resends the start request every Options.StartRetransmit until the
 // controller acknowledges it, giving up with ErrNoResponse
-// Options.StartTimeout after the first send. It then sends the file in
-// chunks of MaxChunkData bytes, up to two in flight, retransmitting any
-// that go unacknowledged for an adaptive timeout, and gives up with
-// ErrNoResponse after Options.StallTimeout with no chunk ACK of any kind;
-// time spent reading r does not count toward it. Only replies from the
-// controller Upload started with count, even if a later Connect records
-// another.
+// Options.StartTimeout after the first send; a resend is always scheduled
+// Options.StartRetransmit after the resend it follows; even after a gap
+// long enough to fall behind that cadence, Upload sends one catch-up resend
+// rather than a burst. It then sends the file in chunks of MaxChunkData
+// bytes, up to two in flight, retransmitting any that have been
+// unacknowledged for strictly longer than an adaptive timeout, and gives up
+// with ErrNoResponse once Options.StallTimeout has passed since the last
+// chunk ACK of any kind, counting from the start ACK's arrival; nothing
+// about sending a chunk, only acknowledging one, resets that window, so
+// time spent reading r counts toward it. Only replies from the controller
+// Upload started with count, even if a later Connect records another.
 //
 // progress, if non-nil, is called once with (0, size) right after the start
 // ACK and again each time the controller's count of accepted chunks
@@ -50,12 +54,14 @@ import (
 // acknowledged, since aborting then risks leaving a partial file on the
 // controller's USB drive.
 //
-// If the transfer fails after the start was acknowledged — a controller
-// error result, a read or send error, or the stall give-up — Upload sends
-// the upload-abort notification (docs/protocol.md §5.5) three times,
-// Options.AbortInterval apart, before returning the error. It never sends
-// it for a start that was refused or went unanswered, or for a completed
-// transfer.
+// If the start request drew any reply from the controller and the transfer
+// did not go on to end cleanly — a start ACK carrying an error result, a
+// chunk-ACK error result, a read or send error, or either give-up above —
+// Upload sends the upload-abort notification (docs/protocol.md §5.5) three
+// times, Options.AbortInterval apart, before returning the error. It never
+// sends it when the start drew no reply at all — the StartTimeout give-up,
+// ctx cancellation before any start ACK, or a start send error — or for a
+// completed transfer.
 func (c *Client) Upload(
 	ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
 ) error {
@@ -81,9 +87,14 @@ func (c *Client) Upload(
 		return err
 	}
 
-	if err := c.startUpload(ctx, remote, startPkt); err != nil {
+	answered, err := c.startUpload(ctx, remote, startPkt)
+	if err != nil {
+		if answered {
+			c.notifyAbort(remote)
+		}
 		return err
 	}
+	startAckAt := c.clock.Now()
 
 	if progress != nil {
 		progress(0, size)
@@ -92,7 +103,7 @@ func (c *Client) Upload(
 		return nil
 	}
 
-	if err := c.sendChunks(remote, r, size, progress); err != nil {
+	if err := c.sendChunks(remote, r, size, progress, startAckAt); err != nil {
 		c.notifyAbort(remote)
 		return err
 	}
@@ -101,14 +112,17 @@ func (c *Client) Upload(
 
 // startUpload sends the upload-start request pkt, resending it every
 // c.startRetransmit until a StartAck arrives, ctx is done, or
-// c.startTimeout passes since the first send.
-func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byte) error {
+// c.startTimeout passes since the first send. It reports whether any
+// start-ACK reply arrived at all, success or failure — Upload uses that to
+// decide whether a refused start still gets the abort notification of
+// docs/protocol.md §5.5.
+func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byte) (answered bool, err error) {
 	ch, cancel := c.expect(TypeUploadStart, remote, anyReply)
 	defer cancel()
 
 	first := c.clock.Now()
 	if err := c.send(pkt, remote); err != nil {
-		return err
+		return false, err
 	}
 	giveUp := first.Add(c.startTimeout)
 	resends := 0
@@ -117,7 +131,7 @@ func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byt
 	for {
 		now := c.clock.Now()
 		if !now.Before(giveUp) {
-			return ErrNoResponse
+			return false, ErrNoResponse
 		}
 		if !now.Before(nextResend) {
 			// A reply that arrived while the resend fell due answers the
@@ -125,14 +139,17 @@ func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byt
 			// resend counts.
 			select {
 			case in := <-ch:
-				return startAckErr(in, resends)
+				return true, startAckErr(in, resends)
 			default:
 			}
 			if err := c.send(pkt, remote); err != nil {
-				return err
+				return false, err
 			}
 			resends++
-			nextResend = first.Add(time.Duration(resends+1) * c.startRetransmit)
+			// Scheduled after this resend's own send time, so a client
+			// that falls behind by more than one interval sends a single
+			// catch-up resend, never a burst (docs/protocol.md §5.3).
+			nextResend = now.Add(c.startRetransmit)
 			continue
 		}
 
@@ -140,11 +157,11 @@ func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byt
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-timer.C():
 		case in := <-ch:
 			timer.Stop()
-			return startAckErr(in, resends)
+			return true, startAckErr(in, resends)
 		}
 	}
 }
@@ -171,8 +188,11 @@ type inflightChunk struct {
 
 // sendChunks sends the chunks of a size-byte file read from r, with the
 // sliding window, adaptive retransmission, and stall give-up of
-// docs/protocol.md §5.3.
-func (c *Client) sendChunks(remote *net.UDPAddr, r io.ReaderAt, size int64, progress func(sent, total int64)) error {
+// docs/protocol.md §5.3. startAckAt is when the start ACK arrived, the
+// stall window's starting point.
+func (c *Client) sendChunks(
+	remote *net.UDPAddr, r io.ReaderAt, size int64, progress func(sent, total int64), startAckAt time.Time,
+) error {
 	ch, cancel := c.expect(TypeUploadChunk, remote, anyReply)
 	defer cancel()
 
@@ -182,10 +202,10 @@ func (c *Client) sendChunks(remote *net.UDPAddr, r io.ReaderAt, size int64, prog
 		window         int64 = 1
 		streak         int
 		srtt           = initialSRTT
-		// lastActivity is the last chunk ACK of any kind, or the last
-		// first send of a chunk, so the stall give-up never counts the
-		// time spent reading the file as the controller's silence.
-		lastActivity time.Time
+		// lastActivity is the last chunk ACK of any kind, starting from the
+		// start ACK's arrival; sending a chunk does not move it, so time
+		// spent reading the file counts toward the stall give-up.
+		lastActivity = startAckAt
 		flight       []inflightChunk
 		buf          = make([]byte, MaxChunkData)
 	)
@@ -233,8 +253,7 @@ func (c *Client) sendChunks(remote *net.UDPAddr, r io.ReaderAt, size int64, prog
 			if err := c.send(pkt, remote); err != nil {
 				return err
 			}
-			lastActivity = c.clock.Now()
-			flight = append(flight, inflightChunk{pkt: pkt, sentAt: lastActivity})
+			flight = append(flight, inflightChunk{pkt: pkt, sentAt: c.clock.Now()})
 			next++
 		}
 
@@ -255,7 +274,7 @@ func (c *Client) sendChunks(remote *net.UDPAddr, r io.ReaderAt, size int64, prog
 			return ErrNoResponse
 		}
 		resendAt := flight[0].sentAt.Add(retransmitTimeout(srtt))
-		if !now.Before(resendAt) {
+		if now.After(resendAt) {
 			for i := range flight {
 				if err := c.send(flight[i].pkt, remote); err != nil {
 					return err
@@ -268,7 +287,9 @@ func (c *Client) sendChunks(remote *net.UDPAddr, r io.ReaderAt, size int64, prog
 			continue
 		}
 
-		timer := c.clock.NewTimer(earlier(resendAt, stallAt).Sub(now))
+		// A retransmit needs the oldest chunk outstanding strictly longer
+		// than the timeout, so wake just past resendAt, not at it.
+		timer := c.clock.NewTimer(earlier(resendAt.Add(time.Nanosecond), stallAt).Sub(now))
 		select {
 		case <-timer.C():
 		case in := <-ch:

@@ -351,8 +351,40 @@ func TestUploadFirstAttemptAckQueuedAsResendFallsDue(t *testing.T) {
 	h.expectStart()
 	h.settle()
 	h.clk.Advance(time.Second)
-	if err := h.wait(); !errors.Is(err, ErrTransfer) {
+	if err := h.expectAborts(); !errors.Is(err, ErrTransfer) {
 		t.Fatalf("Upload = %v, want ErrTransfer", err)
+	}
+}
+
+func TestUploadStartResendAfterSuspensionIsNotABurst(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{}, nil)
+	h.start(t.Context(), bytes.NewReader(nil), 0)
+	t0 := h.clk.Now()
+
+	h.expectStart()
+	h.settle()
+	h.clk.Advance(3500 * time.Millisecond)
+	h.expectStart()
+	if got := h.clk.Since(t0); got != 3500*time.Millisecond {
+		t.Fatalf("resend at %v, want 3.5s", got)
+	}
+	h.settle()
+	h.expectNothingSent()
+
+	h.advanceExactlyf(time.Second, "next resend came early")
+	h.expectStart()
+	if got := h.clk.Since(t0); got != 4500*time.Millisecond {
+		t.Fatalf("second resend at %v, want 4.5s", got)
+	}
+
+	h.settle()
+	h.clk.Advance(500 * time.Millisecond)
+	if err := h.wait(); !errors.Is(err, ErrNoResponse) {
+		t.Fatalf("Upload = %v, want ErrNoResponse", err)
+	}
+	if got := h.clk.Since(t0); got != 5*time.Second {
+		t.Fatalf("gave up at %v, want 5s", got)
 	}
 	h.expectNothingSent()
 }
@@ -374,10 +406,9 @@ func TestUploadStartRefused(t *testing.T) {
 			h.start(t.Context(), bytes.NewReader([]byte("x")), 1)
 			h.expectStart()
 			h.ackStart(tc.result)
-			if err := h.wait(); !errors.Is(err, tc.want) {
+			if err := h.expectAborts(); !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
 			}
-			h.expectNothingSent()
 		})
 	}
 }
@@ -391,10 +422,9 @@ func TestUploadNoUSBAfterResend(t *testing.T) {
 	h.clk.Advance(time.Second)
 	h.expectStart()
 	h.ackStart(StartNoUSB)
-	if err := h.wait(); !errors.Is(err, ErrNoUSB) {
+	if err := h.expectAborts(); !errors.Is(err, ErrNoUSB) {
 		t.Fatalf("Upload = %v, want ErrNoUSB", err)
 	}
-	h.expectNothingSent()
 }
 
 func TestUploadCtxCanceledDuringStart(t *testing.T) {
@@ -546,6 +576,27 @@ func TestUploadChunkBytesAndWindowOpens(t *testing.T) {
 	h.expectNothingSent()
 }
 
+func TestUploadChunkRetransmitRequiresStrictlyPastTimeout(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{}, nil)
+	data := chunkData(1)
+	size := int64(len(data))
+	h.beginChunks(t.Context(), data)
+
+	h.expectChunks(0)
+	h.advanceExactlyf(120*time.Millisecond, "retransmitted before the timeout")
+	h.settle()
+	h.expectNothingSent()
+
+	h.clk.Advance(time.Nanosecond)
+	h.expectChunks(0)
+	h.ackChunk(ChunkOK, 1)
+	h.expectProgress(size, size)
+	if err := h.wait(); err != nil {
+		t.Fatalf("Upload = %v, want nil", err)
+	}
+}
+
 func TestUploadRetransmitDropsWindowToOne(t *testing.T) {
 	t.Parallel()
 	h := newUploadHarness(t, Options{}, nil)
@@ -563,7 +614,8 @@ func TestUploadRetransmitDropsWindowToOne(t *testing.T) {
 		h.expectProgress(int64(i+1)*MaxChunkData, size)
 	}
 	h.expectChunks(3, 4)
-	h.advanceExactlyf(73750*time.Microsecond, "retransmitted before the timeout")
+	h.settle()
+	h.clk.Advance(73750*time.Microsecond + time.Nanosecond)
 	h.expectChunks(3, 4)
 
 	// The window is back to 1: accepting chunk 3 frees one slot, but chunk
@@ -599,12 +651,13 @@ func TestUploadRetransmittedChunkGivesNoSample(t *testing.T) {
 	// sample taken SRTT stays 60ms, so chunk 1 retransmits after 120ms.
 	h.expectChunks(0)
 	h.settle()
-	h.clk.Advance(120 * time.Millisecond)
+	h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 	h.expectChunks(0)
 	h.ackChunk(ChunkOK, 1)
 	h.expectProgress(MaxChunkData, size)
 	h.expectChunks(1)
-	h.advanceExactlyf(120*time.Millisecond, "retransmitted before the timeout")
+	h.settle()
+	h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 	h.expectChunks(1)
 
 	h.ackChunk(ChunkOK, 2)
@@ -631,7 +684,8 @@ func TestUploadSampleShortensRetransmitTimeout(t *testing.T) {
 	h.ackChunk(ChunkOK, 1)
 	h.expectProgress(MaxChunkData, size)
 	h.expectChunks(1)
-	h.advanceExactlyf(100*time.Millisecond, "retransmitted before the timeout")
+	h.settle()
+	h.clk.Advance(100*time.Millisecond + time.Nanosecond)
 	h.expectChunks(1)
 	h.ackChunk(ChunkOK, 2)
 	h.expectProgress(size, size)
@@ -675,8 +729,9 @@ func TestUploadStaleAckIsActivity(t *testing.T) {
 	waitFor(t, h.stale)
 
 	// Without that ACK the stall would have fired at 100ms; now the chunk
-	// retransmits at 120ms and the stall waits for 150ms.
-	h.advanceExactlyf(70*time.Millisecond, "stale ACK did not count as activity")
+	// retransmits just past 120ms and the stall waits for 150ms.
+	h.settle()
+	h.clk.Advance(70*time.Millisecond + time.Nanosecond)
 	h.expectChunks(0)
 
 	h.ackChunk(ChunkOK, 1)
@@ -695,7 +750,7 @@ func TestUploadStaleAckIsActivity(t *testing.T) {
 	if h.clk.Pending() != 1 {
 		t.Fatal("duplicate ACK did not count as activity")
 	}
-	h.clk.Advance(20 * time.Millisecond)
+	h.clk.Advance(20*time.Millisecond + time.Nanosecond)
 	h.expectChunks(1)
 	h.settle()
 	h.clk.Advance(10 * time.Millisecond)
@@ -719,7 +774,7 @@ func (s slowReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return bytes.NewReader(s.data).ReadAt(p, off)
 }
 
-func TestUploadSlowReadIsNotAStall(t *testing.T) {
+func TestUploadSlowReadCountsTowardStall(t *testing.T) {
 	t.Parallel()
 	h := newUploadHarness(t, Options{}, nil)
 	data := chunkData(2)
@@ -734,12 +789,26 @@ func TestUploadSlowReadIsNotAStall(t *testing.T) {
 	h.ackChunk(ChunkOK, 1)
 	h.expectProgress(MaxChunkData, size)
 	h.expectChunks(1)
-	h.ackChunk(ChunkOK, 2)
-	h.expectProgress(size, size)
-	if err := h.wait(); err != nil {
-		t.Fatalf("Upload = %v, want nil", err)
+	if err := h.expectAborts(); !errors.Is(err, ErrNoResponse) {
+		t.Fatalf("Upload = %v, want ErrNoResponse", err)
 	}
-	h.expectNothingSent()
+}
+
+func TestUploadSlowFirstReadCountsTowardStall(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{StallTimeout: 100 * time.Millisecond}, nil)
+	data := chunkData(1)
+	size := int64(len(data))
+	h.start(t.Context(), slowReaderAt{data: data, slowAt: 0, during: func() {
+		h.clk.Advance(200 * time.Millisecond)
+	}}, size)
+	h.expectStart()
+	h.ackStart(StartOK)
+	h.expectProgress(0, size)
+	h.expectChunks(0)
+	if err := h.expectAborts(); !errors.Is(err, ErrNoResponse) {
+		t.Fatalf("Upload = %v, want ErrNoResponse", err)
+	}
 }
 
 func TestUploadAckQueuedDuringReadCountsFirst(t *testing.T) {
@@ -785,12 +854,14 @@ func TestUploadStallGivesUpThenAborts(t *testing.T) {
 	t0 := h.clk.Now()
 
 	h.expectChunks(0)
-	for _, at := range []time.Duration{120 * time.Millisecond, 240 * time.Millisecond} {
+	for range 2 {
 		h.settle()
-		h.clk.Advance(at - h.clk.Since(t0))
+		// A flat 120ms would land exactly on the retransmit timeout;
+		// docs/protocol.md §5.3 requires strictly more before retransmitting.
+		h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 		h.expectChunks(0)
 	}
-	h.advanceExactlyf(60*time.Millisecond, "gave up early")
+	h.advanceExactlyf(300*time.Millisecond-h.clk.Since(t0), "gave up early")
 	if err := h.expectAborts(); !errors.Is(err, ErrNoResponse) {
 		t.Fatalf("Upload = %v, want ErrNoResponse", err)
 	}
@@ -808,7 +879,7 @@ func TestUploadDefaultStallTimeout(t *testing.T) {
 	h.expectChunks(0)
 	for h.clk.Since(t0) < 15*time.Second-120*time.Millisecond {
 		h.settle()
-		h.clk.Advance(120 * time.Millisecond)
+		h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 		h.expectChunks(0)
 	}
 	h.settle()
@@ -929,7 +1000,7 @@ func TestUploadChunkSendFailures(t *testing.T) {
 			if tc.failAt > 1 {
 				h.expectChunks(0)
 				h.settle()
-				h.clk.Advance(120 * time.Millisecond)
+				h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 			}
 			var err error
 			if tc.failAborts {
