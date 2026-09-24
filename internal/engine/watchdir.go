@@ -198,7 +198,7 @@ func (e *Engine) SetWatchDir(dir string) error {
 	if stopped != nil {
 		<-stopped
 	}
-	e.scheduler.clearNonManual()
+	e.scheduler.clearNonManual(dir)
 	return nil
 }
 

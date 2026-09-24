@@ -35,6 +35,13 @@ import (
 const (
 	msgWaitingToSend = "Waiting to send"
 	msgSending       = "Sending"
+
+	// msgFileVanished is the Dropped message for a watched item whose file
+	// is gone by the time the scheduler tries to open it.
+	msgFileVanished = "No longer in the watch folder"
+	// msgFileNoLongerExists is msgFileVanished's counterpart for a manual
+	// send of a file outside the watch folder, which was never "in" one.
+	msgFileNoLongerExists = "File no longer exists"
 )
 
 // item is one file the scheduler knows about, keyed by name. The scheduler
@@ -183,24 +190,37 @@ func (s *scheduler) itemLocked(root, dir, base string) *item {
 	return it
 }
 
-// clearNonManual drops every non-manual entry, used when SetWatchDir
-// restarts the watcher against a new folder. An item currently Sending is
-// left in place: sendOne/finishSend hold its *item directly, not by map
-// lookup, and finishSend's resend branch (see resendAfter) re-arms it to
-// Pending in place — deleting the map entry out from under that would
-// silently lose the resend, since next()/nextDeadline() only ever range
-// over s.items. Once finishSend observes it.sending go false without a
-// resend pending, it removes the entry itself (see finishSend).
-func (s *scheduler) clearNonManual() {
+// clearNonManual drops every non-manual entry that does not belong to the
+// watch folder keep, used when SetWatchDir restarts the watcher against
+// keep, reporting each through dropLocked. An item from keep is left alone:
+// the new watcher may already have reported it. An item currently Sending is
+// left in place, marked orphaned: sendOne/finishSend hold its *item
+// directly, not by map lookup, and finishSend's resend branch (see
+// resendAfter) re-arms it to Pending in place — deleting the map entry out
+// from under that would silently lose the resend, since
+// next()/nextDeadline() only ever range over s.items. Once finishSend
+// observes it.sending go false without a resend pending, it removes the
+// entry itself (see finishSend).
+func (s *scheduler) clearNonManual(keep string) {
 	s.mu.Lock()
-	for name, it := range s.items {
-		if !it.manual && !it.sending {
-			delete(s.items, name)
-		} else if !it.manual {
+	var dropped []TransferEvent
+	for _, it := range s.items {
+		if it.manual || (keep != "" && it.root == keep) {
+			continue
+		}
+		if !it.sending {
+			if ev, ok := s.dropLocked(it, DroppedWatchFolderChanged); ok {
+				dropped = append(dropped, ev)
+			}
+		} else {
 			it.orphaned = true
 		}
 	}
 	s.mu.Unlock()
+
+	for _, ev := range dropped {
+		s.e.dispatcher.emit(ev)
+	}
 }
 
 // retry re-queues a Failed, Rejected, or SentUnfiled file immediately.
@@ -265,6 +285,23 @@ func (s *scheduler) sendFile(root, dir, base, path string, size int64, modTime t
 
 	s.e.dispatcher.emit(ev)
 	s.poke()
+}
+
+// dropLocked removes it from s.items and, unless its last reported state
+// was Sent or Dropped, marks it Dropped with msg and returns the
+// TransferEvent to emit. A Sent row already shows the real outcome; any
+// other row would keep offering a Retry that has nothing left to retry.
+// This is the only place that removes an entry from s.items, so every
+// caller forgetting an item goes through the same accounting. Callers must
+// hold s.mu.
+func (s *scheduler) dropLocked(it *item, msg string) (TransferEvent, bool) {
+	delete(s.items, it.name)
+	if it.state.Terminal() && !it.state.Retryable() {
+		return TransferEvent{}, false
+	}
+	it.state = Dropped
+	it.message = msg
+	return s.event(it), true
 }
 
 // event snapshots it as a TransferEvent. Callers must hold s.mu.
@@ -533,13 +570,11 @@ func (s *scheduler) openForSend(it *item) (*os.File, sendSource, error) {
 func (s *scheduler) preflightFailed(it *item, err error) {
 	s.mu.Lock()
 	it.sending = false
-	// A resendAfter set during the unlocked open above (a concurrent
-	// ready()/sendFile() saw sending==true and deferred instead of
-	// resetting the item directly) is moot: this send never got far
-	// enough to need a resend, and the Pending/orphaned handling below
-	// already re-arms or drops the item — leaving resendAfter set would
-	// make some later finishSend skip archiving as though a real resend
-	// were pending.
+	// A resendAfter set during the unlocked open means a newer report
+	// arrived while it was failing, so a vanished file may already be back.
+	// The flag itself is still cleared, or a later finishSend would skip
+	// archiving as though a resend were pending.
+	refreshed := it.resendAfter
 	it.resendAfter = false
 
 	if it.orphaned {
@@ -548,8 +583,11 @@ func (s *scheduler) preflightFailed(it *item, err error) {
 		// drop it exactly as finishSend does, rather than resurrecting
 		// it as a live Pending candidate pointing at a path the watch
 		// folder already moved away from.
-		s.dropOrphanLocked(it)
+		ev, ok := s.dropOrphanLocked(it)
 		s.mu.Unlock()
+		if ok {
+			s.e.dispatcher.emit(ev)
+		}
 		return
 	}
 
@@ -563,10 +601,19 @@ func (s *scheduler) preflightFailed(it *item, err error) {
 		return
 	}
 
-	if errors.Is(err, fs.ErrNotExist) {
-		delete(s.items, it.name)
+	if errors.Is(err, fs.ErrNotExist) && !refreshed {
+		// A manual send of a file outside the watch folder (root=="") was
+		// never "in" one, so it gets its own, still-true wording.
+		msg := msgFileVanished
+		if it.root == "" {
+			msg = msgFileNoLongerExists
+		}
+		ev, ok := s.dropLocked(it, msg)
 		s.mu.Unlock()
 		s.e.opts.Logger.Info("engine: file vanished before send; forgetting it", "name", it.name)
+		if ok {
+			s.e.dispatcher.emit(ev)
+		}
 		return
 	}
 
@@ -635,6 +682,8 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 		// candidate pointing at that stale path (see finding 4) — drop it
 		// instead, exactly as the non-resend path already does below.
 		if it.orphaned {
+			// Sent here, since resend implies uploadErr == nil, so the drop
+			// is quiet.
 			s.dropOrphanLocked(it)
 			s.mu.Unlock()
 			return
@@ -656,18 +705,26 @@ func (s *scheduler) finishSend(ctx context.Context, it *item, src sendSource, up
 	// from.
 	s.mu.Lock()
 	it.sending = false
+	var ev TransferEvent
+	var dropped bool
 	if it.orphaned {
-		s.dropOrphanLocked(it)
+		ev, dropped = s.dropOrphanLocked(it)
 	}
 	s.mu.Unlock()
+	if dropped {
+		s.e.dispatcher.emit(ev)
+	}
 }
 
-// dropOrphanLocked removes an orphaned item from the queue, unless
-// itemLocked has already replaced it there. Callers must hold s.mu.
-func (s *scheduler) dropOrphanLocked(it *item) {
-	if s.items[it.name] == it {
-		delete(s.items, it.name)
+// dropOrphanLocked removes an orphaned item from the queue through
+// dropLocked, unless itemLocked has already replaced it there: the row then
+// belongs to the replacement, so no Dropped event is reported for it.
+// Callers must hold s.mu.
+func (s *scheduler) dropOrphanLocked(it *item) (TransferEvent, bool) {
+	if s.items[it.name] != it {
+		return TransferEvent{}, false
 	}
+	return s.dropLocked(it, DroppedWatchFolderChanged)
 }
 
 // recordFailure applies the backoff schedule (or disables auto-retry for
