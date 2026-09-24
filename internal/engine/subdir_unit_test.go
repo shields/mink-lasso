@@ -339,6 +339,9 @@ func TestNewFolderFileReplacesOrphan(t *testing.T) {
 	if _, err := os.Stat(newPath); err != nil {
 		t.Errorf("new folder's file moved (Stat error %v), want left for its own send", err)
 	}
+	if evs := takeQueued(t, e); len(evs) == 0 || evs[len(evs)-1].Name != key || evs[len(evs)-1].State != Pending {
+		t.Errorf("events = %+v, want the replacement's Pending last (a superseded orphan must not overwrite its row)", evs)
+	}
 	e.scheduler.mu.Lock()
 	defer e.scheduler.mu.Unlock()
 	got := e.scheduler.items[key]
