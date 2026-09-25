@@ -47,6 +47,49 @@ func requireSerial(t *testing.T) uint32 {
 	return serial
 }
 
+// requireProbeEnabled skips the test unless MINK_LASSO_PROBE=1, so the
+// opt-in probes never run as a side effect of `make integration`.
+func requireProbeEnabled(t *testing.T) {
+	t.Helper()
+
+	if os.Getenv("MINK_LASSO_PROBE") != "1" {
+		t.Skip("MINK_LASSO_PROBE not set to 1; skipping probes (see README.md's \"Controller probes\" section)")
+	}
+}
+
+// requireLongNamesEnabled skips the test unless
+// MINK_LASSO_PROBE_LONG_NAMES=1, on top of MINK_LASSO_PROBE=1 itself, so
+// probeQ12's names longer than the documented limit are never sent without
+// a second, explicit opt-in.
+func requireLongNamesEnabled(t *testing.T) {
+	t.Helper()
+
+	if os.Getenv("MINK_LASSO_PROBE_LONG_NAMES") != "1" {
+		t.Skip("MINK_LASSO_PROBE_LONG_NAMES not set to 1; skipping the long-file-name probe " +
+			"(see README.md's \"Controller probes\" section)")
+	}
+}
+
+// resolveController returns the controller address this suite should use:
+// MINK_LASSO_ADDR, if set, is parsed and returned directly, so nothing
+// broadcasts; otherwise it runs this suite's one broadcast discovery
+// (discoverController) and matches serial.
+func resolveController(t *testing.T, serial uint32) *net.UDPAddr {
+	t.Helper()
+
+	raw := os.Getenv("MINK_LASSO_ADDR")
+	if raw == "" {
+		return discoverController(t, serial)
+	}
+
+	addr, err := net.ResolveUDPAddr("udp4", raw)
+	if err != nil {
+		t.Fatalf("MINK_LASSO_ADDR=%q does not parse as host:port: %v", raw, err)
+	}
+
+	return addr
+}
+
 // newClient constructs a masso.Client with default options and registers its
 // Close for test cleanup.
 func newClient(t *testing.T) *masso.Client {
@@ -154,12 +197,18 @@ func machineIdle(t *testing.T, addr *net.UDPAddr) bool {
 	}
 }
 
+// allowRunning reports whether MINK_LASSO_ALLOW_RUNNING=1 permits the upload
+// tests and probes to run on a machine that is not idle.
+func allowRunning() bool {
+	return os.Getenv("MINK_LASSO_ALLOW_RUNNING") == "1"
+}
+
 // requireIdleOrAllowed skips the calling test unless the machine is idle or
-// MINK_LASSO_ALLOW_RUNNING=1 permits running the upload tests anyway.
+// allowRunning permits running the upload tests anyway.
 func requireIdleOrAllowed(t *testing.T, addr *net.UDPAddr) {
 	t.Helper()
 
-	if os.Getenv("MINK_LASSO_ALLOW_RUNNING") == "1" {
+	if allowRunning() {
 		return
 	}
 

@@ -5,7 +5,8 @@ a client against it. Each is phrased in terms of the protocol alone. An analyst
 answers a question by updating `protocol.md`; once it is answered there, the
 question is removed from this file. A question that only a real controller can
 settle stays here, and `protocol.md` says the point is unverified. Questions
-keep their numbers when others are removed.
+keep their numbers when others are removed. `make probe` (README's "Controller
+probes") records what a real controller does for the ones only it can settle.
 
 ## Upload start
 
@@ -48,3 +49,9 @@ These need a real controller; `protocol.md` records each as unverified.
     field — with or without a leading or trailing backslash — and how is it
     joined with a folder drop's relative path? §5.1 records that the setting's
     text becomes the path field, but not its exact form or the join.
+
+## File names
+
+12. **File-name length.** Does the controller accept a file name longer than 15
+    characters (§5), and store the file under its full name? Masso Link checks
+    nothing narrower than 255 characters (§5.1).
