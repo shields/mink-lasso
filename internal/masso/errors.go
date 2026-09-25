@@ -86,6 +86,7 @@ var (
 	ErrNoResponse = errors.New("no response from Masso")
 
 	// ErrLost indicates a previously connected controller stopped sending
-	// status.
+	// any datagram this Client counts toward connection liveness
+	// (docs/protocol.md §8).
 	ErrLost = errors.New("lost connection to Masso")
 )

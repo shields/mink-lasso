@@ -630,3 +630,188 @@ func TestRequestSendFailure(t *testing.T) {
 		t.Fatalf("DiscoverAt = %v, want ErrSend", err)
 	}
 }
+
+func corruptCRC(pkt []byte) []byte {
+	out := append([]byte(nil), pkt...)
+	out[0] ^= 0xFF
+	return out
+}
+
+// packetOfLength builds a valid packet of exactly n bytes by hand, since
+// frame pads every body to a multiple of 4.
+func packetOfLength(n int, typ byte) []byte {
+	body := make([]byte, n-2)
+	body[0], body[1] = magic[0], magic[1]
+	body[2] = typ
+	crc := crc16XModem(body)
+	pkt := make([]byte, n)
+	pkt[0] = byte(crc)
+	pkt[1] = byte(crc >> 8)
+	copy(pkt[2:], body)
+	return pkt
+}
+
+func TestHandlePacketLivenessTracking(t *testing.T) {
+	t.Parallel()
+	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	foreign := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
+
+	cases := []struct {
+		name   string
+		addr   net.Addr
+		pkt    []byte
+		counts bool
+	}{
+		{"non-status reply from the connected IP", remote, ToolRecord{Index: 1, Name: "drill"}.Encode(), true},
+		{"CRC-valid but undecodable body from the connected IP", remote, frame(0x99, nil), true},
+		{"status from the connected IP", remote, Status{Progress: 5}.Encode(), true},
+		{"reply from a foreign IP", foreign, ToolRecord{Index: 1, Name: "drill"}.Encode(), false},
+		{"bad CRC from the connected IP", remote, corruptCRC(ToolRecord{Index: 1, Name: "drill"}.Encode()), false},
+		{"longer than 1501 bytes from the connected IP", remote, frame(0x99, make([]byte, 1600)), false},
+		{"exactly the max length", remote, packetOfLength(livenessDatagramMax, 0x99), true},
+		{"one byte over the max length", remote, packetOfLength(livenessDatagramMax+1, 0x99), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fc := clock.NewFake(time.Unix(1000, 0))
+			c := newTestClient(t, fc)
+			c.setConnection(remote, Identity{})
+
+			c.handlePacket(tc.pkt, tc.addr)
+
+			got := c.lastHeard.Load()
+			if tc.counts {
+				if got == nil || !got.Equal(fc.Now()) {
+					t.Errorf("lastHeard = %v, want %v", got, fc.Now())
+				}
+			} else if got != nil {
+				t.Errorf("lastHeard = %v, want nil (not counted)", *got)
+			}
+		})
+	}
+}
+
+// waitRunArmed waits until Run has both its keepalive ticker and its lost
+// timer pending, bounded by safetyNet and raced against runErr: a regression
+// that makes Run exit without arming another timer would otherwise leave
+// BlockUntil parked forever instead of the test failing.
+func waitRunArmed(t *testing.T, fc *clock.Fake, runErr <-chan error) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		fc.BlockUntil(2)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case err := <-runErr:
+		t.Fatalf("Run returned early: %v", err)
+	case <-time.After(safetyNet):
+		t.Fatal("timed out waiting for Run to arm its keepalive ticker and lost timer")
+	}
+}
+
+func TestRunLivenessExtendedByNonStatusReplies(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	fc := clock.NewFake(time.Unix(0, 0))
+	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	const keepaliveInterval = time.Hour // long enough to never fire in this test
+	const lostAfter = 100 * time.Millisecond
+	port := freePort(t)
+	c, err := NewClient(Options{
+		Clock: fc, PortMin: port, PortMax: port,
+		KeepaliveInterval: keepaliveInterval, LostAfter: lostAfter,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	c.setConnection(remote, Identity{})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	waitRunArmed(t, fc, runErr)
+
+	const step = 30 * time.Millisecond // well under lostAfter
+	for range 10 {                     // 300ms total: three full LostAfter budgets
+		fc.Advance(step)
+		waitRunArmed(t, fc, runErr) // let a re-arm from crossing the current deadline settle first
+		select {
+		case err := <-runErr:
+			t.Fatalf("Run returned early with a steady stream of non-status replies: %v", err)
+		default:
+		}
+		c.handlePacket(ToolRecord{Index: 1, Name: "drill"}.Encode(), remote)
+	}
+
+	fc.Advance(lostAfter - time.Millisecond)
+	waitRunArmed(t, fc, runErr)
+	select {
+	case err := <-runErr:
+		t.Fatalf("Run returned before LostAfter elapsed since the last reply: %v", err)
+	default:
+	}
+
+	fc.Advance(time.Millisecond)
+	if err := waitFor(t, runErr); !errors.Is(err, ErrLost) {
+		t.Fatalf("Run = %v, want ErrLost", err)
+	}
+}
+
+func TestRunLivenessDatagramsThatDoNotCount(t *testing.T) {
+	t.Parallel()
+	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	foreign := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
+
+	cases := []struct {
+		name string
+		addr net.Addr
+		pkt  []byte
+	}{
+		{"foreign IP", foreign, ToolRecord{Index: 1, Name: "drill"}.Encode()},
+		{"bad CRC", remote, corruptCRC(ToolRecord{Index: 1, Name: "drill"}.Encode())},
+		{"longer than 1501 bytes", remote, frame(0x99, make([]byte, 1600))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			fc := clock.NewFake(time.Unix(0, 0))
+			const keepaliveInterval = time.Hour
+			const lostAfter = 100 * time.Millisecond
+			port := freePort(t)
+			c, err := NewClient(Options{
+				Clock: fc, PortMin: port, PortMax: port,
+				KeepaliveInterval: keepaliveInterval, LostAfter: lostAfter,
+			})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := c.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			})
+			c.setConnection(remote, Identity{})
+
+			runErr := make(chan error, 1)
+			go func() { runErr <- c.Run(ctx) }()
+			waitRunArmed(t, fc, runErr)
+
+			fc.Advance(50 * time.Millisecond)
+			c.handlePacket(tc.pkt, tc.addr)
+			waitRunArmed(t, fc, runErr)
+
+			fc.Advance(lostAfter - 50*time.Millisecond)
+			if err := waitFor(t, runErr); !errors.Is(err, ErrLost) {
+				t.Fatalf("Run = %v, want ErrLost", err)
+			}
+		})
+	}
+}
