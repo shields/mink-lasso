@@ -117,13 +117,13 @@ its controller (`address`) so it can connect without broadcasting.
 
 ### Firewall
 
-Replies arrive on a UDP port between 11000 and 11050, within the range Masso
-Link uses. Windows Firewall lets replies to a request through without a rule, so
-a normal desktop installation needs nothing. When the app runs as a service or
+Replies arrive on a UDP port between 11000 and 11051, the range Masso Link uses.
+Windows Firewall lets replies to a request through without a rule, so a normal
+desktop installation needs nothing. When the app runs as a service or
 unattended, add a rule (as administrator):
 
 ```text
-netsh advfirewall firewall add rule name="mink-lasso UDP" dir=in action=allow protocol=UDP localport=11000-11050
+netsh advfirewall firewall add rule name="mink-lasso UDP" dir=in action=allow protocol=UDP localport=11000-11051
 ```
 
 ## Configuration
@@ -138,7 +138,7 @@ while machining" immediately—and the file is also readable and editable by han
 | `address`              |                                                 | Optional `host:port` to try before broadcasting              |
 | `lastAddress`          |                                                 | Where the controller was last found; maintained by the app   |
 | `watchDir`             |                                                 | Folder to watch                                              |
-| `listenPort`           | `11000`                                         | First UDP port to try for replies (up to 11050)              |
+| `listenPort`           | `11000`                                         | First UDP port to try for replies (up to 11051)              |
 | `scanInterval`         | `2s`                                            | How often the folder is rescanned                            |
 | `settleDelay`          | `3s`                                            | How long a file must be unchanged before it is sent          |
 | `pauseGrace`           | `2m`                                            | Extra wait after the machine goes idle partway through a job |

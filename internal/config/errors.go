@@ -31,8 +31,8 @@ var (
 	// PauseGrace that is zero or negative.
 	ErrNonPositiveDuration = errors.New("config: duration must be positive")
 
-	// ErrListenPort reports a ListenPort outside 11000-11050.
-	ErrListenPort = errors.New("config: listenPort must be between 11000 and 11050")
+	// ErrListenPort reports a ListenPort outside 11000-11051.
+	ErrListenPort = errors.New("config: listenPort must be between 11000 and 11051")
 
 	// ErrLogLevel reports a LogLevel other than debug, info, warn, or error.
 	ErrLogLevel = errors.New("config: logLevel must be one of debug, info, warn, error")

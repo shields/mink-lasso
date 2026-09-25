@@ -38,7 +38,7 @@ import (
 // one test binary. Don't replace it with an OS-assigned free port: released
 // for the caller to rebind, one can be handed to two parallel tests before
 // either rebinds it. The series starts well clear of the package's default
-// 11000-11050 range and below Linux's ephemeral range.
+// 11000-11051 range and below Linux's ephemeral range.
 var nextTestPort = func() *atomic.Int32 {
 	var p atomic.Int32
 	p.Store(30000)

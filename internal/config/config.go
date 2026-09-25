@@ -60,7 +60,7 @@ type Config struct {
 	LastAddress string `json:"lastAddress"`
 	// WatchDir is the folder watched for new G-code files.
 	WatchDir string `json:"watchDir"`
-	// ListenPort is the first UDP port to try (up to 11050).
+	// ListenPort is the first UDP port to try (up to 11051).
 	ListenPort int `json:"listenPort"`
 	// ScanInterval is how often the watch folder is rescanned.
 	ScanInterval Duration `json:"scanInterval"`
