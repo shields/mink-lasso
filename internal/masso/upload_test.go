@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,39 @@ import (
 )
 
 type uploadProgress struct{ sent, total int64 }
+
+// logEntry is one record captured by harnessLogHandler.
+type logEntry struct {
+	level slog.Level
+	msg   string
+}
+
+// harnessLogHandler is uploadHarness's slog.Handler: it delegates to a
+// messageSignalHandler for the "chunk ACK did not advance" stale signal and
+// also offers every record, non-blockingly, on logs — channel operations
+// need no locking of their own, unlike a logger swapped onto the Client
+// after NewClient, which would race the reader goroutine NewClient already
+// started.
+type harnessLogHandler struct {
+	stale messageSignalHandler
+	logs  chan logEntry
+}
+
+func (harnessLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h harnessLogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if err := h.stale.Handle(ctx, r); err != nil {
+		return err
+	}
+	select {
+	case h.logs <- logEntry{r.Level, r.Message}:
+	default:
+	}
+	return nil
+}
+
+func (h harnessLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h harnessLogHandler) WithGroup(string) slog.Handler      { return h }
 
 // uploadHarness runs Upload against a controller scripted by the test.
 // Every packet the Client writes arrives, decoded, on sent instead of going
@@ -43,6 +77,7 @@ type uploadHarness struct {
 	progress chan uploadProgress
 	result   chan error
 	stale    chan struct{}
+	logs     chan logEntry
 }
 
 // newUploadHarness builds a connected Client whose options are opts with
@@ -59,6 +94,7 @@ func newUploadHarness(t *testing.T, opts Options, writeErr func(Request) error) 
 		progress: make(chan uploadProgress, 256),
 		result:   make(chan error, 1),
 		stale:    make(chan struct{}, 1),
+		logs:     make(chan logEntry, 256),
 	}
 	realConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -80,7 +116,10 @@ func newUploadHarness(t *testing.T, opts Options, writeErr func(Request) error) 
 	}}
 	port := freePort(t)
 	opts.Clock = h.clk
-	opts.Logger = slog.New(messageSignalHandler{ch: h.stale, want: "masso: upload: chunk ACK did not advance"})
+	opts.Logger = slog.New(harnessLogHandler{
+		stale: messageSignalHandler{ch: h.stale, want: "masso: upload: chunk ACK did not advance"},
+		logs:  h.logs,
+	})
 	opts.PortMin, opts.PortMax = port, port
 	opts.ListenPacket = func(string, string) (net.PacketConn, error) { return fc, nil }
 	c, err := NewClient(opts)
@@ -176,6 +215,25 @@ func (h *uploadHarness) expectProgress(sent, total int64) {
 func (h *uploadHarness) wait() error {
 	h.t.Helper()
 	return waitFor(h.t, h.result)
+}
+
+// sendFailureLevels drains h.logs, in order, for the level of every
+// "masso: upload: send failed" record logged so far. The caller must
+// already know no more are coming — after wait, typically — since it stops
+// once h.logs itself has nothing left to read.
+func (h *uploadHarness) sendFailureLevels() []slog.Level {
+	h.t.Helper()
+	var levels []slog.Level
+	for {
+		select {
+		case e := <-h.logs:
+			if e.msg == "masso: upload: send failed" {
+				levels = append(levels, e.level)
+			}
+		default:
+			return levels
+		}
+	}
 }
 
 // advanceExactlyf settles, then advances d, failing with format if the
@@ -466,7 +524,7 @@ func TestUploadBadDir(t *testing.T) {
 	h.expectNothingSent()
 }
 
-func TestUploadStartSendFailures(t *testing.T) {
+func TestUploadStartSendFailureRecovers(t *testing.T) {
 	t.Parallel()
 	writeErr := errors.New("write boom")
 	for _, tc := range []struct {
@@ -489,16 +547,118 @@ func TestUploadStartSendFailures(t *testing.T) {
 				return nil
 			})
 			h.start(t.Context(), bytes.NewReader([]byte("x")), 1)
-			if tc.failAt > 1 {
+			if tc.failAt == 2 {
 				h.expectStart()
+			}
+			h.settle()
+			h.clk.Advance(time.Second)
+			if tc.failAt == 2 {
 				h.settle()
 				h.clk.Advance(time.Second)
 			}
-			if err := h.wait(); !errors.Is(err, ErrSend) || !errors.Is(err, writeErr) {
-				t.Fatalf("Upload = %v, want ErrSend wrapping %v", err, writeErr)
+			h.expectStart()
+			h.ackStart(StartOK)
+			h.expectProgress(0, 1)
+			h.expectChunks(0)
+			h.ackChunk(ChunkOK, 1)
+			h.expectProgress(1, 1)
+			if err := h.wait(); err != nil {
+				t.Fatalf("Upload = %v, want nil", err)
 			}
 			h.expectNothingSent()
 		})
+	}
+}
+
+func TestUploadStartSendAlwaysFails(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	h := newUploadHarness(t, Options{}, func(req Request) error {
+		if _, ok := req.(UploadStartRequest); ok {
+			return writeErr
+		}
+		return nil
+	})
+	h.start(t.Context(), bytes.NewReader(nil), 0)
+	t0 := h.clk.Now()
+
+	for i := 1; i <= 4; i++ {
+		h.advanceExactlyf(time.Second, "resend %d came early", i)
+	}
+	h.settle()
+	h.clk.Advance(time.Second)
+	err := h.wait()
+	if !errors.Is(err, ErrNoResponse) || !errors.Is(err, ErrSend) || !errors.Is(err, writeErr) {
+		t.Fatalf("Upload = %v, want ErrNoResponse wrapping ErrSend wrapping %v", err, writeErr)
+	}
+	if got := h.clk.Since(t0); got != 5*time.Second {
+		t.Fatalf("gave up at %v, want 5s", got)
+	}
+	// The start never drew a reply, so no post-transfer signal is sent.
+	h.expectNothingSent()
+}
+
+func TestUploadStartSendFailureThenSilenceIsNotASendError(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	var starts int
+	h := newUploadHarness(t, Options{}, func(req Request) error {
+		if _, ok := req.(UploadStartRequest); ok {
+			starts++
+			if starts == 1 {
+				return writeErr
+			}
+		}
+		return nil
+	})
+	h.start(t.Context(), bytes.NewReader(nil), 0)
+	t0 := h.clk.Now()
+
+	for i := 1; i <= 4; i++ {
+		h.advanceExactlyf(time.Second, "resend %d came early", i)
+		h.expectStart()
+	}
+	h.settle()
+	h.clk.Advance(time.Second)
+	err := h.wait()
+	if !errors.Is(err, ErrNoResponse) || errors.Is(err, ErrSend) {
+		t.Fatalf("Upload = %v, want ErrNoResponse without the first send's failure", err)
+	}
+	if got := h.clk.Since(t0); got != 5*time.Second {
+		t.Fatalf("gave up at %v, want 5s", got)
+	}
+	h.expectNothingSent()
+}
+
+func TestUploadSendFailureLogsWarnOnceThenDebug(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	var starts int
+	h := newUploadHarness(t, Options{}, func(req Request) error {
+		if _, ok := req.(UploadStartRequest); ok {
+			starts++
+			if starts <= 2 {
+				return writeErr
+			}
+		}
+		return nil
+	})
+	h.start(t.Context(), bytes.NewReader([]byte("x")), 1)
+	h.settle()
+	h.clk.Advance(time.Second)
+	h.settle()
+	h.clk.Advance(time.Second)
+	h.expectStart()
+	h.ackStart(StartOK)
+	h.expectProgress(0, 1)
+	h.expectChunks(0)
+	h.ackChunk(ChunkOK, 1)
+	h.expectProgress(1, 1)
+	if err := h.wait(); err != nil {
+		t.Fatalf("Upload = %v, want nil", err)
+	}
+	if got, want := h.sendFailureLevels(), []slog.Level{slog.LevelWarn, slog.LevelDebug}; !slices.Equal(got, want) {
+		t.Fatalf("log levels = %v, want %v", got, want)
 	}
 }
 
@@ -967,61 +1127,167 @@ func TestUploadReadResults(t *testing.T) {
 	}
 }
 
-func TestUploadChunkSendFailures(t *testing.T) {
+func TestUploadChunkSendFailureRecovers(t *testing.T) {
 	t.Parallel()
 	writeErr := errors.New("write boom")
 	for _, tc := range []struct {
-		name       string
-		failAt     int
-		failAborts bool
+		name   string
+		failAt int
 	}{
-		{"first send", 1, false},
-		{"retransmit", 2, false},
-		{"first send, aborts fail too", 1, true},
+		{"first send", 1},
+		{"retransmit", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var chunks int
-			abortErrs := make(chan struct{}, abortNotifications)
 			h := newUploadHarness(t, Options{}, func(req Request) error {
-				switch req.(type) {
-				case UploadChunkRequest:
+				if _, ok := req.(UploadChunkRequest); ok {
 					chunks++
 					if chunks == tc.failAt {
 						return writeErr
 					}
-				case UploadAbortRequest:
-					if tc.failAborts {
-						abortErrs <- struct{}{}
-						return writeErr
-					}
-				default:
 				}
 				return nil
 			})
-			h.beginChunks(t.Context(), chunkData(1))
-			if tc.failAt > 1 {
+			data := chunkData(1)
+			h.beginChunks(t.Context(), data)
+			if tc.failAt == 2 {
 				h.expectChunks(0)
+			}
+			h.settle()
+			h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+			if tc.failAt == 2 {
 				h.settle()
 				h.clk.Advance(120*time.Millisecond + time.Nanosecond)
 			}
-			var err error
-			if tc.failAborts {
-				for i := range abortNotifications {
-					if i > 0 {
-						h.settle()
-						h.clk.Advance(h.c.abortInterval)
-					}
-					waitFor(t, abortErrs)
-				}
-				err = h.wait()
-			} else {
-				err = h.expectAborts()
+			h.expectChunks(0)
+			h.ackChunk(ChunkOK, 1)
+			h.expectProgress(int64(len(data)), int64(len(data)))
+			if err := h.wait(); err != nil {
+				t.Fatalf("Upload = %v, want nil", err)
 			}
-			if !errors.Is(err, ErrSend) || !errors.Is(err, writeErr) {
-				t.Fatalf("Upload = %v, want ErrSend wrapping %v", err, writeErr)
-			}
+			h.expectNothingSent()
 		})
+	}
+}
+
+func TestUploadChunkSendAlwaysFails(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	h := newUploadHarness(t, Options{}, func(req Request) error {
+		if _, ok := req.(UploadChunkRequest); ok {
+			return writeErr
+		}
+		return nil
+	})
+	h.beginChunks(t.Context(), chunkData(1))
+	t0 := h.clk.Now()
+
+	for h.clk.Since(t0) < 15*time.Second-120*time.Millisecond {
+		h.settle()
+		h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+	}
+	h.settle()
+	h.clk.Advance(15*time.Second - h.clk.Since(t0))
+	err := h.expectAborts()
+	if !errors.Is(err, ErrNoResponse) || !errors.Is(err, ErrSend) || !errors.Is(err, writeErr) {
+		t.Fatalf("Upload = %v, want ErrNoResponse wrapping ErrSend wrapping %v", err, writeErr)
+	}
+}
+
+func TestUploadRecoveredStartSendFailureIsNotAStallCause(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	starts := 0
+	h := newUploadHarness(t, Options{StallTimeout: 300 * time.Millisecond}, func(req Request) error {
+		if _, ok := req.(UploadStartRequest); ok {
+			starts++
+			if starts == 1 {
+				return writeErr
+			}
+		}
+		return nil
+	})
+	data := chunkData(2)
+	h.start(t.Context(), bytes.NewReader(data), int64(len(data)))
+	h.settle()
+	h.clk.Advance(time.Second)
+	h.expectStart()
+	h.ackStart(StartOK)
+	h.expectProgress(0, int64(len(data)))
+	t0 := h.clk.Now()
+
+	h.expectChunks(0)
+	for range 2 {
+		h.settle()
+		h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+		h.expectChunks(0)
+	}
+	h.advanceExactlyf(300*time.Millisecond-h.clk.Since(t0), "gave up early")
+	err := h.expectAborts()
+	if !errors.Is(err, ErrNoResponse) || errors.Is(err, ErrSend) {
+		t.Fatalf("Upload = %v, want ErrNoResponse without the start phase's answered send failure", err)
+	}
+}
+
+func TestUploadRecoveredChunkSendFailureIsNotAStallCause(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	var chunks int
+	h := newUploadHarness(t, Options{StallTimeout: 300 * time.Millisecond}, func(req Request) error {
+		if _, ok := req.(UploadChunkRequest); ok {
+			chunks++
+			if chunks == 1 {
+				return writeErr
+			}
+		}
+		return nil
+	})
+	data := chunkData(2)
+	h.beginChunks(t.Context(), data)
+	h.settle()
+	h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+	h.expectChunks(0)
+	h.ackChunk(ChunkOK, 1)
+	h.expectProgress(MaxChunkData, int64(len(data)))
+	t0 := h.clk.Now()
+
+	h.expectChunks(1)
+	for range 2 {
+		h.settle()
+		h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+		h.expectChunks(1)
+	}
+	h.advanceExactlyf(300*time.Millisecond-h.clk.Since(t0), "gave up early")
+	err := h.expectAborts()
+	if !errors.Is(err, ErrNoResponse) || errors.Is(err, ErrSend) {
+		t.Fatalf("Upload = %v, want ErrNoResponse without the answered chunk send failure", err)
+	}
+}
+
+func TestUploadNotifyAbortToleratesSendFailure(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write boom")
+	abortErrs := make(chan struct{}, abortNotifications)
+	h := newUploadHarness(t, Options{}, func(req Request) error {
+		if _, ok := req.(UploadAbortRequest); ok {
+			abortErrs <- struct{}{}
+			return writeErr
+		}
+		return nil
+	})
+	h.beginChunks(t.Context(), chunkData(2))
+	h.expectChunks(0)
+	h.ackChunk(ChunkUSBWriteError, 1)
+	for i := range abortNotifications {
+		if i > 0 {
+			h.settle()
+			h.clk.Advance(h.c.abortInterval)
+		}
+		waitFor(t, abortErrs)
+	}
+	if err := h.wait(); !errors.Is(err, ErrUSBWrite) {
+		t.Fatalf("Upload = %v, want ErrUSBWrite", err)
 	}
 }
 

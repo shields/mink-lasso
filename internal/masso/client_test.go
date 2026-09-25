@@ -712,13 +712,14 @@ func waitRunArmed(t *testing.T, fc *clock.Fake, runErr <-chan error) {
 	}
 }
 
-func TestRunLivenessExtendedByNonStatusReplies(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
+// newRunHarness builds a Client connected to remote with keepaliveInterval
+// and lostAfter, starts Run in a goroutine, and waits for it to arm its
+// timers before returning, so every caller starts from the same point.
+func newRunHarness(
+	t *testing.T, remote *net.UDPAddr, keepaliveInterval, lostAfter time.Duration,
+) (*Client, *clock.Fake, chan error) {
+	t.Helper()
 	fc := clock.NewFake(time.Unix(0, 0))
-	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
-	const keepaliveInterval = time.Hour // long enough to never fire in this test
-	const lostAfter = 100 * time.Millisecond
 	port := freePort(t)
 	c, err := NewClient(Options{
 		Clock: fc, PortMin: port, PortMax: port,
@@ -735,8 +736,17 @@ func TestRunLivenessExtendedByNonStatusReplies(t *testing.T) {
 	c.setConnection(remote, Identity{})
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- c.Run(ctx) }()
+	go func() { runErr <- c.Run(t.Context()) }()
 	waitRunArmed(t, fc, runErr)
+	return c, fc, runErr
+}
+
+func TestRunLivenessExtendedByNonStatusReplies(t *testing.T) {
+	t.Parallel()
+	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	const keepaliveInterval = time.Hour // long enough to never fire in this test
+	const lostAfter = 100 * time.Millisecond
+	c, fc, runErr := newRunHarness(t, remote, keepaliveInterval, lostAfter)
 
 	const step = 30 * time.Millisecond // well under lostAfter
 	for range 10 {                     // 300ms total: three full LostAfter budgets
@@ -781,28 +791,9 @@ func TestRunLivenessDatagramsThatDoNotCount(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := t.Context()
-			fc := clock.NewFake(time.Unix(0, 0))
 			const keepaliveInterval = time.Hour
 			const lostAfter = 100 * time.Millisecond
-			port := freePort(t)
-			c, err := NewClient(Options{
-				Clock: fc, PortMin: port, PortMax: port,
-				KeepaliveInterval: keepaliveInterval, LostAfter: lostAfter,
-			})
-			if err != nil {
-				t.Fatalf("NewClient: %v", err)
-			}
-			t.Cleanup(func() {
-				if err := c.Close(); err != nil {
-					t.Errorf("Close: %v", err)
-				}
-			})
-			c.setConnection(remote, Identity{})
-
-			runErr := make(chan error, 1)
-			go func() { runErr <- c.Run(ctx) }()
-			waitRunArmed(t, fc, runErr)
+			c, fc, runErr := newRunHarness(t, remote, keepaliveInterval, lostAfter)
 
 			fc.Advance(50 * time.Millisecond)
 			c.handlePacket(tc.pkt, tc.addr)
