@@ -21,6 +21,12 @@
 // MINK_LASSO_SERIAL names the controller to use; see README.md's
 // "Integration tests" section for how to run it.
 //
+// TestProbe is a separate, opt-in suite that records what a real controller
+// does in situations docs/protocol.md marks unverified, for an operator to
+// paste back into docs/protocol-questions.md; it additionally requires
+// MINK_LASSO_PROBE=1, so it never runs as a side effect of the suite above.
+// See README.md's "Controller probes" section.
+//
 // A controller talks to one client at a time, so every test in this package
 // runs sequentially, never with t.Parallel().
 //

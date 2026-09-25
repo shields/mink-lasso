@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build coverage fmt integration lint run sim test version winres
+.PHONY: build coverage fmt integration lint probe run sim test version winres
 
 GO_TEST_FLAGS ?= -race -count=1
 COVERAGE_FILE := coverage.out
@@ -83,3 +83,9 @@ sim:
 # Runs against a real controller; every test skips unless MINK_LASSO_SERIAL is set.
 integration: build
 	MINK_LASSO_EXE=$(abspath $(EXE)) go test -tags integration -count=1 -v -timeout 15m ./internal/integration/...
+
+# Runs the opt-in controller probes for docs/protocol-questions.md; every
+# probe skips unless MINK_LASSO_SERIAL is set. See README.md's "Controller
+# probes" section.
+probe:
+	MINK_LASSO_PROBE=1 go test -tags integration -run '^TestProbe$$' -count=1 -v -timeout 30m ./internal/integration/...

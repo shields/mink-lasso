@@ -24,7 +24,7 @@ import "testing"
 //nolint:paralleltest // sequential by design; see the comment above.
 func TestIntegration(t *testing.T) {
 	serial := requireSerial(t)
-	addr := discoverController(t, serial)
+	addr := resolveController(t, serial)
 
 	//nolint:paralleltest // sequential by design; see TestIntegration's doc comment.
 	t.Run("Discover", func(t *testing.T) {
