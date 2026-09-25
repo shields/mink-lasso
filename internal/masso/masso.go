@@ -29,7 +29,7 @@ const (
 	ListenPortMin = 11000
 
 	// ListenPortMax is the last port a client tries to bind for replies.
-	ListenPortMax = 11050
+	ListenPortMax = 11051
 
 	// MaxChunkData is the largest number of file bytes a single upload
 	// chunk (TypeUploadChunk) may carry.

@@ -58,7 +58,7 @@ func TestConfig_Validate(t *testing.T) {
 	}{
 		{name: "default is valid", mutate: func(*Config) {}},
 		{name: "min listen port", mutate: func(c *Config) { c.ListenPort = 11000 }},
-		{name: "max listen port", mutate: func(c *Config) { c.ListenPort = 11050 }},
+		{name: "max listen port", mutate: func(c *Config) { c.ListenPort = 11051 }},
 		{
 			name:    "listen port too low",
 			mutate:  func(c *Config) { c.ListenPort = 10999 },
@@ -66,7 +66,7 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:    "listen port too high",
-			mutate:  func(c *Config) { c.ListenPort = 11051 },
+			mutate:  func(c *Config) { c.ListenPort = 11052 },
 			wantErr: ErrListenPort,
 		},
 		{
