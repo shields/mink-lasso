@@ -22,6 +22,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"msrl.dev/mink-lasso/internal/clock"
@@ -87,6 +88,10 @@ const (
 // notification (docs/protocol.md §5.5) after an acknowledged transfer fails.
 const abortNotifications = 3
 
+// livenessDatagramMax is the longest datagram docs/protocol.md §1 lets count
+// toward connection liveness (§8).
+const livenessDatagramMax = 1501
+
 // waiterBuffer bounds how many not-yet-collected replies a single expect
 // waiter holds before newer ones are dropped. It matters for the waiters
 // that stay registered while several replies can arrive: Discover's, while
@@ -134,8 +139,9 @@ type Options struct {
 	// connected controller. Zero means one second.
 	KeepaliveInterval time.Duration
 
-	// LostAfter is how long Run waits without a status reply before
-	// returning ErrLost. Zero means five seconds.
+	// LostAfter is how long Run waits without any datagram from the
+	// connected controller (docs/protocol.md §8) before returning ErrLost.
+	// Zero means five seconds.
 	LostAfter time.Duration
 
 	// ReplyTimeout bounds each attempt of a request that is retried a
@@ -253,6 +259,12 @@ type Client struct {
 	waiters  map[byte][]*waiter
 	remote   *net.UDPAddr
 	identity Identity
+
+	// lastHeard is when noteLiveness last counted a datagram toward
+	// connection liveness (docs/protocol.md §8), nil before the first. The
+	// reader stores it on every datagram and Run loads it, so it is atomic
+	// to keep the reader's hot path off mu.
+	lastHeard atomic.Pointer[time.Time]
 
 	statusIn  chan Status // written by the reader goroutine only
 	statusOut chan Status // written by Run only
@@ -387,11 +399,16 @@ func (c *Client) readLoop() {
 // registered waiter whose type matches, whose source it came from (see
 // waiter.from), and whose match function accepts it. A status reply instead
 // goes to the one-slot latest-value channel Run drains, once connected only
-// from the controller's IP (docs/protocol.md §1). Anything undecodable,
-// unmatched, or unwanted (no waiter, foreign source, buffer full, matcher
-// rejects) is dropped with a debug log; the reader never blocks on a slow or
-// absent consumer, so duplicate and stray replies are harmless.
+// from the controller's IP (docs/protocol.md §1). Independent of all that —
+// and even for a datagram whose body never decodes — noteLiveness credits
+// the connected controller with being heard from (docs/protocol.md §8).
+// Anything undecodable, unmatched, or unwanted (no waiter, foreign source,
+// buffer full, matcher rejects) is dropped with a debug log; the reader
+// never blocks on a slow or absent consumer, so duplicate and stray replies
+// are harmless.
 func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
+	c.noteLiveness(pkt, addr)
+
 	reply, err := DecodeReply(pkt)
 	if err != nil {
 		c.logger.Debug("masso: dropping undecodable packet", "error", err, "from", addr)
@@ -431,6 +448,38 @@ func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
 func sameIP(addr net.Addr, want *net.UDPAddr) bool {
 	ua, ok := addr.(*net.UDPAddr)
 	return ok && ua.IP.Equal(want.IP)
+}
+
+// noteLiveness credits addr with a datagram Run's lost-connection timer
+// should count (docs/protocol.md §8): one from Remote's IP, within
+// livenessDatagramMax, whose framing passes the magic and CRC check
+// (docs/protocol.md §2) — regardless of packet type, and even when the body
+// goes on to fail its per-type decode. It is a no-op before Connect has set
+// a Remote.
+func (c *Client) noteLiveness(pkt []byte, addr net.Addr) {
+	if len(pkt) > livenessDatagramMax {
+		return
+	}
+	remote := c.Remote()
+	if remote == nil || !sameIP(addr, remote) {
+		return
+	}
+	if _, _, err := parse(pkt); err != nil {
+		return
+	}
+	now := c.clock.Now()
+	c.lastHeard.Store(&now)
+}
+
+// lastActivitySince returns the more recent of start and the last datagram
+// noteLiveness has counted, or start itself if none has arrived yet. It is
+// the reference point Run's lost-connection timer measures elapsed silence
+// against.
+func (c *Client) lastActivitySince(start time.Time) time.Time {
+	if lh := c.lastHeard.Load(); lh != nil && lh.After(start) {
+		return *lh
+	}
+	return start
 }
 
 // replyTypeOf returns the packet type byte a decoded Reply came from. Reply's
@@ -594,8 +643,11 @@ func (c *Client) Connect(ctx context.Context, addr *net.UDPAddr) (Identity, Conf
 	return id, cfg, nil
 }
 
+// configRequest requests addr's config, accepting the reply only from addr's
+// IP (docs/protocol.md §1): Connect always addresses one known controller,
+// so any other source cannot be the answer.
 func (c *Client) configRequest(ctx context.Context, addr *net.UDPAddr) (ConfigReply, error) {
-	reply, err := c.request(ctx, TypeConfig, nil, anyReply, Config(c.clock.Now()), addr, c.replyTimeout, defaultAttempts)
+	reply, err := c.request(ctx, TypeConfig, addr, anyReply, Config(c.clock.Now()), addr, c.replyTimeout, defaultAttempts)
 	if err != nil {
 		return ConfigReply{}, err
 	}
@@ -606,9 +658,10 @@ func (c *Client) configRequest(ctx context.Context, addr *net.UDPAddr) (ConfigRe
 }
 
 // Run sends a keepalive to Remote at Options.KeepaliveInterval and publishes
-// every status reply to Status(). It returns ErrLost if no status arrives
-// for Options.LostAfter, ErrNotConnected if called before a successful
-// Connect, or ctx.Err() when ctx is canceled.
+// every status reply to Status(). It returns ErrLost if no datagram arrives
+// from the connected controller (docs/protocol.md §8) for Options.LostAfter,
+// ErrNotConnected if called before a successful Connect, or ctx.Err() when
+// ctx is canceled.
 func (c *Client) Run(ctx context.Context) error {
 	remote := c.Remote()
 	if remote == nil {
@@ -623,11 +676,13 @@ func (c *Client) Run(ctx context.Context) error {
 	ticker := c.clock.NewTicker(c.keepaliveInterval)
 	defer ticker.Stop()
 
+	start := c.clock.Now()
 	lost := c.clock.NewTimer(c.lostAfter)
-	// lost is reassigned below on every status, so the cleanup must read
-	// it through a closure rather than bind to today's Timer — a bare
-	// "defer lost.Stop()" would only ever stop the very first Timer
-	// created here, leaking whichever one is current when Run returns.
+	// lost is reassigned below whenever it fires but the controller was
+	// heard from since it was armed, so the cleanup must read it through a
+	// closure rather than bind to today's Timer — a bare "defer
+	// lost.Stop()" would only ever stop the very first Timer created here,
+	// leaking whichever one is current when Run returns.
 	defer func() { lost.Stop() }()
 
 	for {
@@ -637,11 +692,13 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ticker.C():
 			c.sendKeepalive(remote)
 		case <-lost.C():
-			return ErrLost
+			elapsed := c.clock.Since(c.lastActivitySince(start))
+			if elapsed >= c.lostAfter {
+				return ErrLost
+			}
+			lost = c.clock.NewTimer(c.lostAfter - elapsed)
 		case st := <-c.statusIn:
 			setLatestStatus(c.statusOut, st)
-			lost.Stop()
-			lost = c.clock.NewTimer(c.lostAfter)
 		}
 	}
 }

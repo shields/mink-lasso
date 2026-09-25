@@ -21,7 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,19 +324,22 @@ func TestUploadAlreadyStartedAfterResend(t *testing.T) {
 }
 
 // nowHook runs hook once, from Now, the first time the time it reports
-// reaches at.
+// reaches at. hook is expected to deliver a reply via handlePacket, whose
+// own liveness tracking calls Now again on the same goroutine before hook
+// returns, so the guard must tolerate that reentrant call rather than
+// block on it.
 type nowHook struct {
 	*clock.Fake
 
-	at   time.Time
-	once sync.Once
-	hook func()
+	at    time.Time
+	fired atomic.Bool
+	hook  func()
 }
 
 func (n *nowHook) Now() time.Time {
 	now := n.Fake.Now()
-	if !now.Before(n.at) {
-		n.once.Do(n.hook)
+	if !now.Before(n.at) && n.fired.CompareAndSwap(false, true) {
+		n.hook()
 	}
 	return now
 }
@@ -1085,11 +1088,11 @@ func TestUploadKeepsItsControllerAcrossConnect(t *testing.T) {
 	h.expectNothingSent()
 }
 
-func TestConnectRepliesAreNotSourceFiltered(t *testing.T) {
+func TestConnectFiltersRepliesToAddrIP(t *testing.T) {
 	t.Parallel()
 	h := newUploadHarness(t, Options{}, nil)
 	target := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
-	elsewhere := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
+	foreign := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := h.c.Connect(t.Context(), target)
@@ -1099,14 +1102,74 @@ func TestConnectRepliesAreNotSourceFiltered(t *testing.T) {
 	if req, ok := h.next().(DiscoveryRequest); !ok {
 		t.Fatalf("first request = %#v, want DiscoveryRequest", req)
 	}
-	h.c.handlePacket(Identity{Serial: 9, Version: "v"}.Encode(), elsewhere)
+	h.c.handlePacket(Identity{Serial: 9, Version: "v"}.Encode(), foreign)
+	h.c.handlePacket(Identity{Serial: 9, Version: "v"}.Encode(), target)
+
 	if req, ok := h.next().(ConfigRequest); !ok {
 		t.Fatalf("second request = %#v, want ConfigRequest", req)
 	}
-	h.c.handlePacket(ConfigReply{Serial: 9}.Encode(), elsewhere)
+	h.c.handlePacket(ConfigReply{Serial: 9}.Encode(), foreign)
+	h.c.handlePacket(ConfigReply{Serial: 9}.Encode(), target)
 
 	if err := waitFor(t, done); err != nil {
 		t.Fatalf("Connect: %v", err)
+	}
+}
+
+func TestConnectDiscoveryFailsWithOnlyForeignReplies(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{}, nil)
+	target := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	foreign := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := h.c.Connect(t.Context(), target)
+		done <- err
+	}()
+
+	for range defaultAttempts {
+		if req, ok := h.next().(DiscoveryRequest); !ok {
+			t.Fatalf("request = %#v, want DiscoveryRequest", req)
+		}
+		h.c.handlePacket(Identity{Serial: 9, Version: "v"}.Encode(), foreign)
+		h.settle()
+		h.clk.Advance(h.c.replyTimeout)
+	}
+
+	if err := waitFor(t, done); !errors.Is(err, ErrNoResponse) {
+		t.Fatalf("Connect = %v, want ErrNoResponse", err)
+	}
+}
+
+func TestConnectConfigFailsWithOnlyForeignReplies(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{}, nil)
+	target := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: ControllerPort}
+	foreign := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: ControllerPort}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := h.c.Connect(t.Context(), target)
+		done <- err
+	}()
+
+	if req, ok := h.next().(DiscoveryRequest); !ok {
+		t.Fatalf("first request = %#v, want DiscoveryRequest", req)
+	}
+	h.c.handlePacket(Identity{Serial: 9, Version: "v"}.Encode(), target)
+
+	for range defaultAttempts {
+		if req, ok := h.next().(ConfigRequest); !ok {
+			t.Fatalf("request = %#v, want ConfigRequest", req)
+		}
+		h.c.handlePacket(ConfigReply{Serial: 9}.Encode(), foreign)
+		h.settle()
+		h.clk.Advance(h.c.replyTimeout)
+	}
+
+	if err := waitFor(t, done); !errors.Is(err, ErrNoResponse) {
+		t.Fatalf("Connect = %v, want ErrNoResponse", err)
 	}
 }
 

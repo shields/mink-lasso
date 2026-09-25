@@ -82,9 +82,12 @@ func (c *Client) Discover(ctx context.Context, timeout time.Duration) ([]Found, 
 
 // DiscoverAt sends a unicast discovery request to addr — which retargets
 // that controller's replies to this client — and waits up to timeout for
-// its identity reply.
+// its identity reply, accepted only from addr's IP (docs/protocol.md §1):
+// addr always names one known controller, so any other source cannot be the
+// answer. A broadcast Discover has no address yet to filter against, per
+// §1's discovery-scan exception.
 func (c *Client) DiscoverAt(ctx context.Context, addr *net.UDPAddr, timeout time.Duration) (Identity, error) {
-	reply, err := c.request(ctx, TypeDiscovery, nil, anyReply, Discovery(c.LocalPort()), addr, timeout, 1)
+	reply, err := c.request(ctx, TypeDiscovery, addr, anyReply, Discovery(c.LocalPort()), addr, timeout, 1)
 	if err != nil {
 		return Identity{}, err
 	}
