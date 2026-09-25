@@ -407,15 +407,21 @@ func (c *Client) readLoop() {
 // never blocks on a slow or absent consumer, so duplicate and stray replies
 // are harmless.
 func (c *Client) handlePacket(pkt []byte, addr net.Addr) {
-	c.noteLiveness(pkt, addr)
+	remote := c.Remote()
+	parsedTyp, _, parseErr := parse(pkt)
+	c.noteLiveness(pkt, addr, remote, parseErr)
+	if parseErr != nil {
+		c.logger.Debug("masso: dropping undecodable packet", "error", parseErr, "from", addr)
+		return
+	}
 
-	reply, err := DecodeReply(pkt)
+	reply, err := decodeReplyBody(parsedTyp, pkt)
 	if err != nil {
 		c.logger.Debug("masso: dropping undecodable packet", "error", err, "from", addr)
 		return
 	}
 	if st, ok := reply.(Status); ok {
-		if remote := c.Remote(); remote != nil && !sameIP(addr, remote) {
+		if remote != nil && !sameIP(addr, remote) {
 			c.logger.Debug("masso: dropping status from a foreign source", "from", addr)
 			return
 		}
@@ -451,20 +457,19 @@ func sameIP(addr net.Addr, want *net.UDPAddr) bool {
 }
 
 // noteLiveness credits addr with a datagram Run's lost-connection timer
-// should count (docs/protocol.md §8): one from Remote's IP, within
-// livenessDatagramMax, whose framing passes the magic and CRC check
-// (docs/protocol.md §2) — regardless of packet type, and even when the body
-// goes on to fail its per-type decode. It is a no-op before Connect has set
-// a Remote.
-func (c *Client) noteLiveness(pkt []byte, addr net.Addr) {
+// should count (docs/protocol.md §8): one from remote's IP, within
+// livenessDatagramMax, whose framing passed the magic and CRC check
+// handlePacket already ran (parseErr) — regardless of packet type, and even
+// when the body goes on to fail its per-type decode. It is a no-op before
+// Connect has set a Remote (remote nil).
+func (c *Client) noteLiveness(pkt []byte, addr net.Addr, remote *net.UDPAddr, parseErr error) {
 	if len(pkt) > livenessDatagramMax {
 		return
 	}
-	remote := c.Remote()
 	if remote == nil || !sameIP(addr, remote) {
 		return
 	}
-	if _, _, err := parse(pkt); err != nil {
+	if parseErr != nil {
 		return
 	}
 	now := c.clock.Now()
@@ -576,10 +581,13 @@ func mustType[T any](v any) T {
 	return t
 }
 
-// send writes pkt to addr, wrapping any error as ErrSend. request and
-// Upload use it for every send they make; sendKeepalive and notifyAbort do
-// not, since a missed keepalive or abort notification is logged and
-// tolerated rather than treated as a failure worth returning.
+// send writes pkt to addr, wrapping any error as ErrSend. request returns
+// that error directly. Upload's own sends go through trySend instead, which
+// logs a failure and carries on rather than ending the transfer — like
+// Masso Link itself (docs/protocol.md §5.5), Upload never treats a failed
+// send as distinct from one that is simply still unacknowledged.
+// sendKeepalive and notifyAbort go further still, logging and dropping a
+// failed send with no retry at all.
 func (c *Client) send(pkt []byte, addr net.Addr) error {
 	if _, err := c.conn.WriteTo(pkt, addr); err != nil {
 		return fmt.Errorf("%w: %w", ErrSend, err)

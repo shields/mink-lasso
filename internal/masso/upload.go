@@ -41,8 +41,14 @@ import (
 // with ErrNoResponse once Options.StallTimeout has passed since the last
 // chunk ACK of any kind, counting from the start ACK's arrival; nothing
 // about sending a chunk, only acknowledging one, resets that window, so
-// time spent reading r counts toward it. Only replies from the controller
-// Upload started with count, even if a later Connect records another.
+// time spent reading r counts toward it. A socket send that fails, whether
+// for a start request or a chunk, does not end Upload by itself:
+// docs/protocol.md §5.5 says Masso Link never checks whether an individual
+// send succeeded, so Upload treats a failed send exactly like one that
+// simply has not been acknowledged yet and lets the schedule above retry
+// it; an ErrNoResponse that follows wraps the most recent send error as
+// its cause if that send failed. Only replies from the controller Upload
+// started with count, even if a later Connect records another.
 //
 // progress, if non-nil, is called once with (0, size) right after the start
 // ACK and again each time the controller's count of accepted chunks
@@ -56,12 +62,11 @@ import (
 //
 // If the start request drew any reply from the controller and the transfer
 // did not go on to end cleanly — a start ACK carrying an error result, a
-// chunk-ACK error result, a read or send error, or either give-up above —
-// Upload sends the upload-abort notification (docs/protocol.md §5.5) three
-// times, Options.AbortInterval apart, before returning the error. It never
-// sends it when the start drew no reply at all — the StartTimeout give-up,
-// ctx cancellation before any start ACK, or a start send error — or for a
-// completed transfer.
+// chunk-ACK error result, a read error, or either give-up above — Upload
+// sends the upload-abort notification (docs/protocol.md §5.5) three times,
+// Options.AbortInterval apart, before returning the error. It never sends
+// it when the start drew no reply at all — the StartTimeout give-up or ctx
+// cancellation before any start ACK — or for a completed transfer.
 func (c *Client) Upload(
 	ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
 ) error {
@@ -87,7 +92,8 @@ func (c *Client) Upload(
 		return err
 	}
 
-	answered, err := c.startUpload(ctx, remote, startPkt)
+	sf := &sendFailures{}
+	answered, err := c.startUpload(ctx, remote, startPkt, sf)
 	if err != nil {
 		if answered {
 			c.notifyAbort(remote)
@@ -103,27 +109,72 @@ func (c *Client) Upload(
 		return nil
 	}
 
-	if err := c.sendChunks(remote, r, size, progress, startAckAt); err != nil {
+	if err := c.sendChunks(remote, r, size, progress, startAckAt, sf); err != nil {
 		c.notifyAbort(remote)
 		return err
 	}
 	return nil
 }
 
+// sendFailures tracks failed socket sends across one Upload call:
+// docs/protocol.md §5.5 says Masso Link's sender never checks whether an
+// individual send succeeded, so trySend records a failure here instead of
+// ending the caller. last is the most recent send's error, nil once a send
+// succeeds: a give-up blames a send failure only when the last packet never
+// left this machine, since after a send that did, the silence is the
+// controller's. warned records that this call has already logged a failure
+// at Warn.
+type sendFailures struct {
+	last   error
+	warned bool
+}
+
+// trySend sends pkt to addr on behalf of startUpload or sendChunks,
+// recording a failure in sf rather than returning it: docs/protocol.md
+// §5.5 treats a send Masso Link never checks the result of as no
+// different from a chunk or start retry that simply has not been
+// acknowledged yet, so the ordinary resend/retransmit schedule covers it.
+// The first failure in sf logs at Warn; every later one in the same
+// Upload call logs at Debug, so a real outage cannot flood the log.
+func (c *Client) trySend(pkt []byte, addr net.Addr, sf *sendFailures) {
+	sf.last = c.send(pkt, addr)
+	if sf.last == nil {
+		return
+	}
+	if sf.warned {
+		c.logger.Debug("masso: upload: send failed", "error", sf.last)
+	} else {
+		c.logger.Warn("masso: upload: send failed", "error", sf.last)
+		sf.warned = true
+	}
+}
+
+// noResponseErr reports a give-up as ErrNoResponse, wrapping the last
+// send's error as its cause when that send failed, so errors.Is still finds
+// both ErrNoResponse and the send error.
+func noResponseErr(sf *sendFailures) error {
+	if sf.last == nil {
+		return ErrNoResponse
+	}
+	return fmt.Errorf("%w: %w", ErrNoResponse, sf.last)
+}
+
 // startUpload sends the upload-start request pkt, resending it every
 // c.startRetransmit until a StartAck arrives, ctx is done, or
-// c.startTimeout passes since the first send. It reports whether any
-// start-ACK reply arrived at all, success or failure — Upload uses that to
-// decide whether a refused start still gets the abort notification of
-// docs/protocol.md §5.5.
-func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byte) (answered bool, err error) {
+// c.startTimeout passes since the first send. A failed send, first attempt
+// or resend, does not cut this short (docs/protocol.md §5.5; sf records
+// it): it keeps the same cadence and give-up as an unacknowledged send. It
+// reports whether any start-ACK reply arrived at all, success or failure —
+// Upload uses that to decide whether a refused start still gets the abort
+// notification of docs/protocol.md §5.5.
+func (c *Client) startUpload(
+	ctx context.Context, remote *net.UDPAddr, pkt []byte, sf *sendFailures,
+) (answered bool, err error) {
 	ch, cancel := c.expect(TypeUploadStart, remote, anyReply)
 	defer cancel()
 
 	first := c.clock.Now()
-	if err := c.send(pkt, remote); err != nil {
-		return false, err
-	}
+	c.trySend(pkt, remote, sf)
 	giveUp := first.Add(c.startTimeout)
 	resends := 0
 	nextResend := first.Add(c.startRetransmit)
@@ -131,7 +182,7 @@ func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byt
 	for {
 		now := c.clock.Now()
 		if !now.Before(giveUp) {
-			return false, ErrNoResponse
+			return false, noResponseErr(sf)
 		}
 		if !now.Before(nextResend) {
 			// A reply that arrived while the resend fell due answers the
@@ -142,9 +193,7 @@ func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byt
 				return true, startAckErr(in, resends)
 			default:
 			}
-			if err := c.send(pkt, remote); err != nil {
-				return false, err
-			}
+			c.trySend(pkt, remote, sf)
 			resends++
 			// Scheduled after this resend's own send time, so a client
 			// that falls behind by more than one interval sends a single
@@ -189,9 +238,14 @@ type inflightChunk struct {
 // sendChunks sends the chunks of a size-byte file read from r, with the
 // sliding window, adaptive retransmission, and stall give-up of
 // docs/protocol.md §5.3. startAckAt is when the start ACK arrived, the
-// stall window's starting point.
+// stall window's starting point. A failed send, of a new chunk or of a
+// retransmission, does not cut this short (docs/protocol.md §5.5; sf
+// records it): the chunk stays in flight exactly as if it had been sent
+// and not yet acknowledged, picked up by the same retransmit timeout as
+// any other unacknowledged chunk.
 func (c *Client) sendChunks(
 	remote *net.UDPAddr, r io.ReaderAt, size int64, progress func(sent, total int64), startAckAt time.Time,
+	sf *sendFailures,
 ) error {
 	ch, cancel := c.expect(TypeUploadChunk, remote, anyReply)
 	defer cancel()
@@ -250,9 +304,7 @@ func (c *Client) sendChunks(
 			if err != nil {
 				return err
 			}
-			if err := c.send(pkt, remote); err != nil {
-				return err
-			}
+			c.trySend(pkt, remote, sf)
 			flight = append(flight, inflightChunk{pkt: pkt, sentAt: c.clock.Now()})
 			next++
 		}
@@ -271,14 +323,12 @@ func (c *Client) sendChunks(
 		now := c.clock.Now()
 		stallAt := lastActivity.Add(c.stallTimeout)
 		if !now.Before(stallAt) {
-			return ErrNoResponse
+			return noResponseErr(sf)
 		}
 		resendAt := flight[0].sentAt.Add(retransmitTimeout(srtt))
 		if now.After(resendAt) {
 			for i := range flight {
-				if err := c.send(flight[i].pkt, remote); err != nil {
-					return err
-				}
+				c.trySend(flight[i].pkt, remote, sf)
 				flight[i].sentAt = now
 				flight[i].retransmitted = true
 			}

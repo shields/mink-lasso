@@ -100,7 +100,8 @@ func (r Identity) MaxTools() int {
 // ConfigReply is the 10-byte reply to a config (handshake) request
 // (TypeConfig).
 type ConfigReply struct {
-	// Serial is the low 16 bits of the controller's serial number.
+	// Serial is 16 bits of the controller's 32-bit serial number
+	// (docs/protocol.md §3.1, §3.2); which 16 bits is not yet established.
 	Serial uint16
 }
 
@@ -318,6 +319,13 @@ func DecodeReply(pkt []byte) (Reply, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeReplyBody(typ, pkt)
+}
+
+// decodeReplyBody decodes pkt's per-type body given its already-parsed type
+// byte typ; handlePacket calls it directly to share one parse(pkt) call
+// with noteLiveness instead of paying for a second one.
+func decodeReplyBody(typ byte, pkt []byte) (Reply, error) {
 	switch typ {
 	case TypeDiscovery:
 		return decodeIdentity(pkt)
