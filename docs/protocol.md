@@ -23,6 +23,22 @@ by one or more of:
   Windows PE, and macOS Apple Silicon (arm64) builds of v2.14 and v2.15.0.
   Statements specific to v2.14/v2.15 come from the client binaries alone, with
   no live capture, and are unverified against real firmware.
+- **Static analysis, folder-drop queuing (v2.15)** — the recursive
+  directory-walk routine and its top-level (per-dropped-item) caller, read
+  directly from a plain GNU objdump linear disassembly of the v2.15 Linux ELF
+  (no decompiler), located via constants specific to each routine (the
+  `$10`/`faDirectory` attribute bit, the depth and entry-count limits, the
+  `Chr(9)` TAB test). The routine that builds the start packet's path field —
+  needed to pin down how a configured base-path setting reaches it — was not
+  conclusively identified in this pass; §5.1 hedges accordingly. This pass
+  covers v2.15 only: the generic plumbing a form needs to receive any drop at
+  all (`AllowDropFiles`, `OnDropFiles`, `FormDropFiles`) already exists,
+  unchanged, in v2.12 and v2.14, so whether an earlier version's own drop
+  handler already walks a dropped directory, or simply ignores or rejects one,
+  was not established either way. One piece of the feature is confirmed new to
+  v2.15 specifically: the "skipped" wording folded into the transfer-status
+  caption (§5.1) appears in the v2.15 binary's string table and not in v2.12's
+  or v2.14's.
 
 > This is unofficial documentation. It is not affiliated with or endorsed by
 > Masso. Uploading a file only writes it to the controller's USB drive; it does
@@ -178,7 +194,8 @@ these bytes** — zeros work equally well; Masso Link sends the wall clock.
 ```
 
 Reply (10 bytes): `[crc] 03 00 03 | SS SS | 00 00 0A` — bytes 5–6 echo the
-serial.
+serial. Which 16 bits of the 32-bit serial (§3.1) these are, and whether Masso
+Link compares them against anything, is not yet established.
 
 ### 3.3 Keepalive / status — `0x01`
 
@@ -234,6 +251,12 @@ Offsets are from the start of the datagram.
 | **17–49** |  ≤33 | **current file name** | NUL-terminated ASCII, max 33 characters (empty when idle); Masso Link never reads past byte 49                                                                                                                   |
 |     …–269 |    — | reserved              | `0x00` when idle; holds additional run-time data on a busy machine                                                                                                                                               |
 
+Whether byte 50 holds the terminating NUL when the file name is exactly 33
+characters long, or the name instead runs to the end of the field with no
+terminator there, is not established: no capture with a name of that exact
+length was available, and Masso Link's own indifference to anything past byte 49
+(above) does not by itself say which the controller does.
+
 The app renders the machine-state text and the alarm banners it shows —
 `Machining`, `Machine Stopped`, `Change Tool`, `SPINDLE ALARM`,
 `X/Y/Z/A/B MOTOR ALARM`, `X/Y/Z/A/B HARD LIMIT ALARM`, `SPINDLE COOLANT ALARM`,
@@ -288,7 +311,11 @@ The formula is the same in every version: `pathlen=1, namelen=9` (the
 15-character name 34 bytes.
 
 For a plain root upload the path is a single backslash (`pathlen=1`, path byte
-`5C`), unless a base-path setting (normally empty) is configured. Captured
+`5C`), unless a base-path setting (normally empty) is configured, in which case
+that setting's text becomes the path field instead. Whether Masso Link sends it
+verbatim, or trims it, or adds a leading or trailing backslash it did not
+already have, was not established in this pass: the routine that builds this
+field was not conclusively located (see the provenance note above). Captured
 example for an 87-byte file named `CLTEST.NC`:
 
 ```
@@ -307,11 +334,72 @@ directly inside a dropped folder named `JOBS`, or `JOBS\SUB` one level deeper:
 - the relative path is seeded with the dropped folder's own name, then each
   deeper directory name is appended with a single backslash — never a leading or
   trailing backslash;
+- when a base-path setting (see above) is also configured, it is joined to that
+  relative path to form the final path field. The exact join — whether it always
+  inserts a backslash, whether it collapses one the base-path setting already
+  ends with — depends on the same unlocated routine as the base-path setting
+  above, and was not established in this pass. With the setting empty, the
+  relative path alone is sent, with no leading backslash, exactly as the bullet
+  above describes;
 - the name field carries only the bare file name; the relative path never
   includes it;
-- the walk is capped at 16 levels of recursion and 500 queued entries total;
-- a file or directory whose name contains a TAB character is silently skipped
-  (v2.15 uses TAB as a delimiter in its internal queue);
+- the walk is capped at 16 levels of recursion and 500 queued entries total, but
+  the two limits are scoped differently: recursion depth is an ordinary call
+  parameter, started fresh every time Masso Link begins walking a newly dropped
+  folder, so the 16-level cap applies per dropped folder rather than being
+  shared across several folders dropped in the same gesture; the 500-entry cap,
+  by contrast, is checked against the current length of Masso Link's single
+  upload queue — the same queue every dropped file and folder is added to — so
+  it is a running total across the whole drop: several folders dropped together,
+  or folders alongside loose files, draw on one shared 500-entry budget rather
+  than each getting its own;
+- a file is silently skipped if the filesystem path Masso Link has built for it
+  by the time it is reached — the dropped item's own path, every directory name
+  descended through on the way, and the file's own name, all together — contains
+  a TAB character anywhere in it (v2.15 uses TAB as a delimiter in its own
+  internal queue). This is tested only for files, not for a directory itself:
+  recursing into a directory never tests that directory's own name in isolation,
+  but because the directory's name becomes part of the path tested for every
+  file beneath it, a TAB embedded in a directory's name still ends up rejecting
+  everything under that directory — just file by file, as each one is reached,
+  rather than by turning away the directory itself;
+- a file is also silently skipped if its extension is not on the same allow-list
+  §5's Filename rules already describe — whether the file is a top-level drop or
+  one found during a folder's walk — and skipped too if its own name is longer
+  than 255 characters. Beyond those two checks and the TAB check above, a name
+  is otherwise unrestricted: no check on which bytes it may contain, no case
+  change, and — so far as a search for `CON`, `PRN`, `AUX`, `NUL`,
+  `COM1`–`COM9`, and `LPT1`–`LPT9` as literal strings in the binary turned up,
+  which would not catch a check written some other way — no check against
+  Windows' reserved device names. Separately: whether the accumulated relative
+  path itself sits in a fixed-size buffer that would silently truncate a
+  component pushing the total past 255 bytes, rather than rejecting the entry,
+  was not established in this pass;
+- what reaches the operator is narrower than what gets turned away. Masso Link
+  keeps its own count of rejected entries, and only some of the checks above add
+  to it: the TAB check firing and an over-length name do, at the top level or
+  during a folder's walk alike; a loose top-level file's extension being off the
+  allow-list does too, but the same check failing on a file found during a
+  folder's walk does not; and a loose top-level file turned away because the
+  queue was already at 500 does, but the 500-entry cap being reached mid-walk
+  does not (below) — nor does the 16-level cap. Whenever the count is nonzero, a
+  distinct code path (separate from the one taken when it is zero) folds it into
+  the transfer-status caption, alongside the "Sending N of M" text during a
+  multi-file send or on its own once queuing goes idle. A fragment of that
+  wording is recoverable: the v2.15 binary's string table holds the literal text
+  " skipped)", stored in the same cluster of caption-building literals as the
+  "Sending ", " of ", " sent", and similar fragments this document already
+  quotes, and it is absent from both v2.12's and v2.14's string tables. How a
+  count is spliced into it, and the rest of the caption's exact wording, were
+  not recovered. Neither cap-exceeded exit from the walk itself goes through the
+  counting step: a directory beyond the 16-level cap ends that branch of the
+  walk immediately, and reaching the 500-entry cap abandons whatever the walk
+  had not yet reached — in the directory being read, and everything below it —
+  the same way, with neither case incrementing the count or otherwise notifying
+  the operator. So the caption's count understates what the two caps alone cut
+  off, since most of it during a folder walk is never individually visited — and
+  understates it by more still, since an in-walk extension mismatch is silently
+  uncounted too;
 - a client-side check rejects `pathlen + namelen + 19 > 1501` with a generic
   local error; both fields are Pascal short strings of at most 255 bytes, so it
   cannot fire.
@@ -320,12 +408,18 @@ No packet exists for creating a directory on the controller. Whether the
 controller creates missing directories itself, or requires them to already
 exist, is unverified — and so is which result, if any, a start ACK or the first
 chunk ACK carries when the directory named in the path field does not exist;
-nothing in the client distinguishes that case from any other transfer error.
-Which bytes a directory name may contain, and whether one path component has a
-length limit narrower than the 255-byte path field as a whole, are likewise
-controller-side questions the client binaries do not resolve: Masso Link imposes
-no per-component check of its own, only the overall path/name limits this
-section already describes.
+nothing in the client distinguishes that case from any other transfer error. A
+folder-dropped file is added to the same upload queue as any other file (above)
+and sent through the same per-file start/chunks/ACK sequence, so if the
+controller does report some distinct result for a missing directory, Masso
+Link's existing per-file abort and whole-queue-stop handling (§5.4, §5.6) would
+apply to it the same as any other transfer error; whether the send/queue code
+also carries some folder-specific branch beyond that was not checked in this
+pass. Which bytes a directory name may contain on the wire, and whether one path
+component has a length limit narrower than the 255-byte path field as a whole,
+remain controller-side questions the client binaries do not resolve; what Masso
+Link itself does or does not validate before sending a directory name is set out
+above.
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
 
@@ -341,13 +435,24 @@ The `0xF7` case only arises for a client that retransmits the start packet
 the first attempt having succeeded. v2.12 never resends the start packet and
 treats `0xF7` like any other error.
 
-Whether real firmware actually answers a resent start request with `0xF7` — and,
-if so, whether it then expects the transfer to begin at chunk 0 rather than
-wherever the first attempt left off — is unverified against real hardware; the
-client binaries only show how Masso Link interprets that byte on the wire, not
-what a controller sends it under. Likewise unverified: whether a controller that
-answers a start request with an error result has already begun the upload, and
-stores any chunks the client goes on to send regardless.
+On the client side, a post-retry `0xF7` and a plain `0x00` are handled
+identically from that point on: either way, Masso Link enters the chunk phase
+through the same initialization, with the send window, the round-trip estimate,
+and the chunk index all starting fresh exactly as after a plain `0x00`. Nothing
+in the client remembers how far an earlier attempt might have gotten, so it has
+no way to ask to resume anywhere but chunk 0. On any other result — anything but
+`0x00` or a post-retry `0xF7` — Masso Link sends no chunk at all: it goes
+directly from recording the error to ending the transfer (§5.5), with no window
+in which a chunk could go out first.
+
+Whether real firmware actually answers a resent start request with `0xF7`, and
+whether a controller that does so then expects the transfer to begin at chunk 0,
+remains unverified against real hardware: the client binaries show what Masso
+Link itself sends and does in each case, not what a controller sends it under or
+does in response. Likewise unverified: whether a controller that answers a start
+request with an error result has already begun the upload and stores any chunks
+sent afterward — a question real firmware alone can settle, since Masso Link
+itself never sends a chunk in that situation for one to react to.
 
 ### 5.2 Data chunk — `0x0B`
 
@@ -479,17 +584,29 @@ whether _some_ start-ACK reply arrived, not whether it reported success, so a
 refused start (§5.1) is followed by the same notification as a chunk-phase
 failure. A transfer that never drew a start-ACK reply at all (the 5 s give-up in
 §5.1) does not send it, since by that definition the start itself was never
-acknowledged. A transfer that completes cleanly never sends it either. Whether a
-failure on the socket send itself — as opposed to a failed local file read — is
-followed by the same notification was not pinned down in the client binaries.
+acknowledged. A transfer that completes cleanly never sends it either. A failure
+of the socket send itself is followed by the same notification, and for the same
+underlying reason as every case above: every one of these endings is detected
+and handled by one single, shared exit from the sending routine, and nothing on
+the way there — for a chunk send or any other packet this routine sends — ever
+examines whether an individual send succeeded. A send that fails silently is
+therefore no different, from Masso Link's point of view, from a chunk that
+simply hasn't been acknowledged yet: the chunk (or start retry) it belonged to
+goes unacknowledged, the same 15 s no-activity timeout above eventually fires
+exactly as it would for any other stall, and that shared exit sends `0x0C` under
+the same rule as a disk-read failure — three times, 20 ms apart, with no
+difference in count or spacing by cause.
 
-Its effect on the controller is unknown; the most plausible reading, since it
-names no file or path, is an abort/cleanup notification. mink-lasso sends it
-under the same condition. Whether the controller needs it has not been tested,
-and neither has what the controller does with the partial file it was writing —
-keep it, delete it, or something else — or what accepted count, if any, it
-reports for chunks sent to it after this notification; these are controller-side
-questions the client binaries cannot settle.
+Masso Link's own part ends with the third packet: it does not wait for a reply
+before moving on, consistent with no receiver ever checking an incoming packet's
+type against `0x0C` in the first place. Its effect on the controller is unknown;
+the most plausible reading, since it names no file or path, is an abort/cleanup
+notification. mink-lasso sends it under the same condition. Whether the
+controller needs it has not been tested, and neither has what the controller
+does with the partial file it was writing — keep it, delete it, or something
+else — or what accepted count, if any, it reports for chunks sent to it after
+this notification; these are controller-side questions the client binaries
+cannot settle.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 
@@ -631,4 +748,12 @@ This spec corrects and extends the prior community work
 - Verified toolchain: Masso Link v2.12, controller firmware v5.13, tshark 4.2.6,
   Ghidra 12.1.3 for everything tagged v2.12 above; Capstone 5.0.7 and angr
   10.0.0 over the Linux ELF, Windows PE, and macOS Apple Silicon builds of Masso
-  Link v2.14 and v2.15.0 for everything tagged v2.14/v2.15.
+  Link v2.14 and v2.15.0 for everything tagged v2.14/v2.15; a plain GNU objdump
+  linear disassembly (no decompiler; exact objdump build not on hand to record)
+  of the v2.15 Linux ELF for everything tagged "folder-drop queuing" above. A
+  substring-based diff between the v2.12 and v2.15 string tables was also tried
+  and is unreliable on its own: run naively, it reports a string as
+  version-specific when only that string's immediate neighbor in the extracted
+  table changed, not the string itself — the "skipped" finding in §5.1 was
+  instead confirmed by checking each version's full string table directly, not
+  from this diff.
