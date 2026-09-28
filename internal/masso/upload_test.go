@@ -412,8 +412,8 @@ func TestUploadFirstAttemptAckQueuedAsResendFallsDue(t *testing.T) {
 	h.expectStart()
 	h.settle()
 	h.clk.Advance(time.Second)
-	if err := h.expectAborts(); !errors.Is(err, ErrTransfer) {
-		t.Fatalf("Upload = %v, want ErrTransfer", err)
+	if err := h.expectAborts(); !errors.Is(err, ErrTransferOpen) {
+		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
 	}
 }
 
@@ -457,7 +457,7 @@ func TestUploadStartRefused(t *testing.T) {
 		result byte
 		want   error
 	}{
-		{"already started on first attempt", StartAlreadyStarted, ErrTransfer},
+		{"already started on first attempt", StartAlreadyStarted, ErrTransferOpen},
 		{"no USB", StartNoUSB, ErrNoUSB},
 		{"other", 0x42, ErrTransfer},
 	} {

@@ -270,7 +270,7 @@ func TestStartAckRoundTripAndErr(t *testing.T) {
 	}{
 		{"ok", StartOK, nil},
 		{"no usb", StartNoUSB, ErrNoUSB},
-		{"already started", StartAlreadyStarted, ErrTransfer},
+		{"already started", StartAlreadyStarted, ErrTransferOpen},
 		{"other", 0x42, ErrTransfer},
 	}
 	for _, tt := range tests {

@@ -594,7 +594,7 @@ func TestUploadStartResults(t *testing.T) {
 		want   error
 	}{
 		{"no USB", masso.StartNoUSB, masso.ErrNoUSB},
-		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransfer},
+		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransferOpen},
 		{"other error", 0x42, masso.ErrTransfer},
 	}
 	for _, tc := range cases {

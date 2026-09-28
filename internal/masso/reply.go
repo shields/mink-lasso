@@ -201,11 +201,12 @@ const (
 	StartOK = 0x00
 	// StartNoUSB indicates no USB flash drive is connected.
 	StartNoUSB = 0xE9
-	// StartAlreadyStarted means success only in reply to a start request
-	// the client has resent: an earlier attempt already started the
-	// upload. In reply to a first attempt it is a generic transfer error,
-	// which is how StartAck.Err treats it; Client.Upload decides when to
-	// accept it.
+	// StartAlreadyStarted means a transfer of this file is already open
+	// on the controller. In reply to a start request the client has
+	// resent, that transfer is this one, started by an earlier attempt,
+	// so it means success. In reply to a first attempt it is a transfer
+	// left open by an earlier upload (docs/protocol.md §5.1), which is how
+	// StartAck.Err treats it; Client.Upload decides when to accept it.
 	StartAlreadyStarted = 0xF7
 )
 
@@ -230,13 +231,15 @@ func (a StartAck) Encode() []byte {
 }
 
 // Err maps a.Result to a sentinel error, or nil for StartOK. It maps
-// StartAlreadyStarted to ErrTransfer.
+// StartAlreadyStarted to ErrTransferOpen.
 func (a StartAck) Err() error {
 	switch a.Result {
 	case StartOK:
 		return nil
 	case StartNoUSB:
 		return ErrNoUSB
+	case StartAlreadyStarted:
+		return ErrTransferOpen
 	default:
 		return ErrTransfer
 	}
