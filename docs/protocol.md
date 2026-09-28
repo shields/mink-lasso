@@ -284,8 +284,9 @@ for a folder drop (v2.15; §5.1). The file is stored only; it is not executed.
 
 - ≤ **15 characters**, ASCII. No length check on the file name was found in any
   Masso Link binary, v2.12 through v2.15; the limit is a documented assumption.
-  (probe) The controller does not enforce it: it accepted and stored files with
-  16- and 33-character names, loaded the 33-character one by its full name, and
+  (probe) The controller does not enforce it: it accepted files with 16- and
+  33-character names, stored them under their full names (read back on a PC)
+  with the content sent, loaded the 33-character one by its full name, and
   reported that name in full in the status packet (§4). The longest name it
   accepts is untested; the status packet's file-name field holds only 33
   characters.
@@ -472,10 +473,14 @@ accepted count 2). The displaced transfer is never closed; see §5.5.
 Bytes 6–9 of a start ACK carry no information: they are whatever the
 controller's previous reply left at those offsets (probe: `00 FF 97 01`, bytes
 6–9 of the status reply before it, and `55 53 45 52`, `USER`, after a canceled
-chunk ACK). Likewise unverified: whether a controller that answers a start
-request with an error result has already begun the upload and stores any chunks
-sent afterward — a question real firmware alone can settle, since Masso Link
-itself never sends a chunk in that situation for one to react to.
+chunk ACK). (probe) With the USB drive removed, a start request drew `0xE9`. A
+chunk sent afterward, which Masso Link never does, drew result `0x00` with
+accepted count 1, byte for byte the ACK that the controller's previous transfer,
+a completed one-chunk upload, had drawn; with no drive, nothing was stored, so
+that ACK evidently reflects the earlier transfer, as a displaced transfer's
+chunk does (above). A client must not read a chunk ACK after a refused start as
+progress. Whether a start refused with a drive present begins an upload is
+untested; no other way to draw a refusal is known.
 
 ### 5.2 Data chunk — `0x0B`
 

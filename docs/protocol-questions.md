@@ -12,11 +12,9 @@ probes") records what a real controller does for the ones only it can settle.
 
 These need a real controller; `protocol.md` records each as unverified.
 
-3. **Refused starts.** Does the controller begin an upload, and store chunks
-   sent afterward, when it answers a start request with an error result? Masso
-   Link never sends a chunk after one (§5.1). A start for another file while a
-   transfer is open is accepted (§5.1), so removing the USB drive (`0xE9`) is
-   the only known way to draw an error.
+3. **Refused starts.** With no USB drive, a start draws `0xE9` and a chunk sent
+   afterward stores nothing (§5.1). Is there any refusal with a drive present,
+   and does the controller begin an upload after one?
 4. **After `0x0C`.** `0x0C` ends a transfer's data and frees its name, though
    the controller's screen keeps showing it (§5.5). Does it ever leave a partial
    or 0-byte file behind?
@@ -34,7 +32,8 @@ These need a real controller; `protocol.md` records each as unverified.
     by `0x0C` (§5.5), a start request drew no reply for 2 s; the resend, and the
     status request after it, drew identity replies (§3.1) instead, and the
     controller's screen showed "File transfer error, timeout" naming no file,
-    which later cleared. What triggers this, and which transfer timed out?
+    which later cleared; no file for that start was on the drive afterward. What
+    triggers this, and which transfer timed out?
 
 ## Replies
 
