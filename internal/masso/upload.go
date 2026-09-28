@@ -60,21 +60,19 @@ import (
 // acknowledged, since aborting then risks leaving a partial file on the
 // controller's USB drive.
 //
-// If the first start request draws StartAlreadyStarted, a transfer of this
-// file is still open on the controller, left by a client that never sent
-// the upload-abort notification. Upload then sends that notification three
-// times, Options.AbortInterval apart, waits one more AbortInterval, and
-// starts again once, as above; only if that start draws StartAlreadyStarted
-// too, as it does for a transfer another file's start displaced
-// (docs/protocol.md §5.5), does Upload return ErrTransferOpen.
-//
-// If the start request drew any reply from the controller and the transfer
-// did not go on to end cleanly — a start ACK carrying an error result, a
-// chunk-ACK error result, a read error, or either give-up above — Upload
-// sends the upload-abort notification (docs/protocol.md §5.5) three times,
-// Options.AbortInterval apart, before returning the error. It never sends
-// it when the start drew no reply at all — the StartTimeout give-up or ctx
-// cancellation before any start ACK — or for a completed transfer.
+// If the controller accepted the start and the transfer did not go on to
+// end cleanly — a chunk-ACK error result, a read error, or the stall
+// give-up above — Upload sends the upload-abort notification
+// (docs/protocol.md §5.5) three times, Options.AbortInterval apart, before
+// returning the error, so the controller removes the partial file. It never
+// sends it otherwise: the notification deletes the file of the controller's
+// current transfer, even a completed one, and after a refused start or none
+// at all, that is not this upload's but whatever the controller last
+// accepted. Masso Link sends it after a refused start too; mink-lasso
+// deliberately does not. In particular, a first start that draws
+// StartAlreadyStarted returns ErrTransferOpen without trying to free the
+// transfer, since a client cannot tell whether that transfer is the
+// controller's current one.
 func (c *Client) Upload(
 	ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
 ) error {
@@ -101,23 +99,11 @@ func (c *Client) Upload(
 	}
 
 	sf := &sendFailures{}
-	answered, err := c.startUpload(ctx, remote, startPkt, sf)
-	if errors.Is(err, ErrTransferOpen) {
-		// A transfer of this file is still open, left by a client that
-		// never sent the upload-abort notification; sending it frees the
-		// name (docs/protocol.md §5.5). The controller answers each
-		// notification with a canceled chunk ACK, so wait one more
-		// interval for those to arrive, and be dropped, before anything
-		// waits for chunk ACKs.
-		c.logger.Info("masso: upload: freeing a transfer of this file the controller still had open", "name", name)
-		c.notifyAbort(remote)
-		<-c.clock.After(c.abortInterval)
-		answered, err = c.startUpload(ctx, remote, startPkt, sf)
-	}
-	if err != nil {
-		if answered {
-			c.notifyAbort(remote)
-		}
+	// A refused start opens no transfer, so the controller's current one is
+	// still whatever it last accepted, possibly another, completed file,
+	// which the upload-abort notification would delete (docs/protocol.md
+	// §5.5). So none is sent here.
+	if err := c.startUpload(ctx, remote, startPkt, sf); err != nil {
 		return err
 	}
 	startAckAt := c.clock.Now()
@@ -183,13 +169,8 @@ func noResponseErr(sf *sendFailures) error {
 // c.startRetransmit until a StartAck arrives, ctx is done, or
 // c.startTimeout passes since the first send. A failed send, first attempt
 // or resend, does not cut this short (docs/protocol.md §5.5; sf records
-// it): it keeps the same cadence and give-up as an unacknowledged send. It
-// reports whether any start-ACK reply arrived at all, success or failure —
-// Upload uses that to decide whether a refused start still gets the abort
-// notification of docs/protocol.md §5.5.
-func (c *Client) startUpload(
-	ctx context.Context, remote *net.UDPAddr, pkt []byte, sf *sendFailures,
-) (answered bool, err error) {
+// it): it keeps the same cadence and give-up as an unacknowledged send.
+func (c *Client) startUpload(ctx context.Context, remote *net.UDPAddr, pkt []byte, sf *sendFailures) error {
 	ch, cancel := c.expect(TypeUploadStart, remote, anyReply)
 	defer cancel()
 
@@ -202,7 +183,7 @@ func (c *Client) startUpload(
 	for {
 		now := c.clock.Now()
 		if !now.Before(giveUp) {
-			return false, noResponseErr(sf)
+			return noResponseErr(sf)
 		}
 		if !now.Before(nextResend) {
 			// A reply that arrived while the resend fell due answers the
@@ -210,7 +191,7 @@ func (c *Client) startUpload(
 			// resend counts.
 			select {
 			case in := <-ch:
-				return true, startAckErr(in, resends)
+				return startAckErr(in, resends)
 			default:
 			}
 			c.trySend(pkt, remote, sf)
@@ -226,11 +207,11 @@ func (c *Client) startUpload(
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return false, ctx.Err()
+			return ctx.Err()
 		case <-timer.C():
 		case in := <-ch:
 			timer.Stop()
-			return true, startAckErr(in, resends)
+			return startAckErr(in, resends)
 		}
 	}
 }

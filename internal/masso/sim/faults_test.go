@@ -406,19 +406,43 @@ func TestRestart_DiscardsUploadInProgress(t *testing.T) {
 	}
 }
 
-func TestUploadAbort_KeepsCompletedFile(t *testing.T) {
+func TestUploadAbort_DeletesCurrentCompletedFile(t *testing.T) {
 	t.Parallel()
 	ctrl := newController(t, sim.Options{})
 	client := newClient(t)
+	uploadFile(t, client, ctrl.Addr(), "EARLIER.NC", []byte("earlier"))
 	uploadFile(t, client, ctrl.Addr(), "DONE.NC", []byte("done"))
-	mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
-	mustWrite(t, client, ctrl.Addr(), masso.Keepalive(time.Now()))
-	readReply(t, client)
-	if n := ctrl.Aborts(); n != 1 {
-		t.Fatalf("Aborts() = %d, want 1", n)
+
+	// The notification deletes the current transfer's file even though it
+	// completed, and only that one; a second deletes nothing more.
+	for range 2 {
+		mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
+		if ack := readChunkAck(t, client); ack != canceledAck {
+			t.Fatalf("reply to the abort = %+v, want %+v", ack, canceledAck)
+		}
+		if _, ok := ctrl.File("DONE.NC"); ok {
+			t.Fatal("the current transfer's completed file survived the abort")
+		}
+		if got, ok := ctrl.File("EARLIER.NC"); !ok || string(got) != "earlier" {
+			t.Fatalf("File(EARLIER.NC) = %q (ok=%v), want %q", got, ok, "earlier")
+		}
 	}
-	if got, ok := ctrl.File("DONE.NC"); !ok || string(got) != "done" {
-		t.Fatalf("File() = %q (ok=%v), want %q", got, ok, "done")
+}
+
+func TestUploadAbort_AfterRefusedStartDeletesEarlierFile(t *testing.T) {
+	t.Parallel()
+	ctrl := newController(t, sim.Options{})
+	client := newClient(t)
+	uploadFile(t, client, ctrl.Addr(), "GOOD.NC", []byte("good"))
+
+	// A refused start opens no transfer, so the completed one stays
+	// current, and an abort then deletes it.
+	ctrl.SetStartResult(0x42)
+	expectStartResult(t, client, ctrl.Addr(), "REFUSED.NC", 1, 0x42)
+	mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
+	readChunkAck(t, client)
+	if _, ok := ctrl.File("GOOD.NC"); ok {
+		t.Fatal("the completed file survived an abort after a refused start")
 	}
 }
 

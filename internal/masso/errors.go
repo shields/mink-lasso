@@ -74,11 +74,11 @@ var (
 	ErrTransfer = errors.New("error occurred while transferring file")
 
 	// ErrTransferOpen indicates the controller answered a first start
-	// request with StartAlreadyStarted, even after Client.Upload sent the
-	// upload-abort notification that frees a transfer left open: an
-	// earlier transfer of the same file is stuck, which only canceling on
-	// the Masso's own screen or, if nothing shows there, restarting the
-	// Masso ends (docs/protocol.md §5.1, §5.5). Masso Link reports this as
+	// request with StartAlreadyStarted: an earlier transfer of the same
+	// file is still open, left by a client that stopped partway through or
+	// displaced by a start for another file. Only canceling it on the
+	// Masso's own screen or, if nothing shows there, restarting the Masso
+	// ends it (docs/protocol.md §5.1, §5.5). Masso Link reports this as
 	// ErrTransfer; this text is mink-lasso's own.
 	ErrTransferOpen = errors.New("an earlier transfer of this file is still open on Masso")
 

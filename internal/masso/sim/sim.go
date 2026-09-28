@@ -103,6 +103,11 @@ type Controller struct {
 	// canceled is true from an upload-abort notification until the next
 	// start begins an upload: chunks meanwhile draw a canceled ACK.
 	canceled bool
+	// current names the controller's current transfer: the upload the
+	// most recent accepted start began, whether still in progress or
+	// complete, until an upload-abort notification or Restart. The
+	// notification deletes its file (docs/protocol.md §5.5).
+	current string
 	// stuck holds the names of transfers a start for another file
 	// displaced while they were open; a start for one draws
 	// StartAlreadyStarted until Restart (docs/protocol.md §5.5).
@@ -368,6 +373,7 @@ func (c *Controller) handleUploadStart(r masso.UploadStartRequest, src net.Addr)
 func (c *Controller) beginUpload(name string, size uint32) {
 	c.resetUpload()
 	c.canceled = false
+	c.current = name
 	c.uploading = true
 	c.uploadName = name
 	c.uploadSize = size
@@ -386,14 +392,19 @@ func (c *Controller) resetUpload() {
 	c.seenChunk = make(map[uint32]bool)
 }
 
-// handleUploadAbort cancels any upload in progress and, unless silenced,
-// answers with a canceled chunk ACK, as a real controller does
-// (docs/protocol.md §5.5). Chunks draw that same ACK until the next start
-// begins an upload. It frees no name a displaced transfer left stuck.
+// handleUploadAbort cancels the current transfer, deleting its file even
+// if it completed, and, unless silenced, answers with a canceled chunk ACK,
+// as a real controller does (docs/protocol.md §5.5). Chunks draw that same
+// ACK until the next start begins an upload. It frees no name a displaced
+// transfer left stuck.
 func (c *Controller) handleUploadAbort(src net.Addr) {
 	c.mu.Lock()
 	c.aborts++
 	c.resetUpload()
+	if c.current != "" {
+		delete(c.files, c.current)
+		c.current = ""
+	}
 	c.canceled = true
 	silent := c.silent || c.silencedByChunk
 	c.mu.Unlock()
@@ -586,13 +597,15 @@ func (c *Controller) SetSilent(silent bool) {
 
 // Restart frees every file name a displaced transfer left stuck and
 // discards any upload in progress, as restarting a real controller does
-// (docs/protocol.md §5.5). Unlike a real restart, it keeps the reply target,
-// the stored files, the fault settings, and the counters.
+// (docs/protocol.md §5.5), so that no transfer is current. Unlike a real
+// restart, it keeps the reply target, the stored files, the fault
+// settings, and the counters.
 func (c *Controller) Restart() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.resetUpload()
 	c.canceled = false
+	c.current = ""
 	c.stuck = make(map[string]bool)
 }
 

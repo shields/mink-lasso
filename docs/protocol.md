@@ -632,49 +632,66 @@ difference in count or spacing by cause.
 
 Masso Link's own part ends with the third packet: it does not wait for a reply
 before moving on, consistent with no receiver ever checking an incoming packet's
-type against `0x0C` in the first place. mink-lasso sends it under the same
-condition.
+type against `0x0C` in the first place. mink-lasso sends it only after a start
+the controller accepted, for the reason given below.
 
 (probe) The controller does reply: each `0x0C` draws a 10-byte chunk ACK (type
 `0x0B`) with result `0x02` and bytes 6–9 spelling `USER`, so three packets draw
 three replies. A client that keeps using the same socket must read or discard
 them, or it will take them for the replies to its next requests.
 
-As far as the data goes, `0x0C` does end the transfer: a chunk of the same
-transfer sent afterward draws the same `USER` ACK, and a new start request for
-the same file draws `0x00`, whether sent at once or after a transfer of another
-file. The controller's screen does not follow. It went on showing "Receiving"
-with the file's name and the progress reached (66% with two of four chunks
-accepted, 98% with one of two) for over 15 minutes, until the transfer was
-canceled by hand or until a start request for any other file replaced it. The
-status packet (§4) shows none of this (idle, empty file name).
+`0x0C` ends the controller's current transfer (§5.1): the upload the most recent
+accepted start began, whether still in progress or already complete. It
+**deletes that transfer's file**, even a completed one. After two uploads had
+both completed, one `0x0C` removed the second file and left the first; a start
+followed at once by `0x0C`, and one followed by two of four chunks, each left no
+file. A chunk of the transfer sent afterward draws the same `USER` ACK, and a
+new start request for the same file draws `0x00`, whether sent at once or after
+a transfer of another file. With nothing in progress, `0x0C` shows nothing on
+the controller's screen; its replies are the same.
+
+After a transfer in progress is stopped this way, the controller's screen does
+not follow. It went on showing "Receiving" with the file's name and the progress
+reached (66% with two of four chunks accepted, 98% with one of two) for over 15
+minutes, until the transfer was canceled by hand or until a start request for
+any other file replaced it. The status packet (§4) shows none of this (idle,
+empty file name).
 
 `0x0C` also frees a transfer that the client left open without it, as a client
-that dies partway through would. After a start and chunk 0 of a two-chunk file,
-the same start sent again drew `0xF7`; after `0x0C`, the next start drew `0x00`,
-and the whole file then went through from chunk 0. So a client whose first start
-request draws `0xF7` can send `0x0C` and start again.
+that dies partway through would, provided that transfer is still the current
+one. After a start and chunk 0 of a two-chunk file, the same start sent again
+drew `0xF7`; after `0x0C`, the next start drew `0x00`, and the whole file then
+went through from chunk 0.
 
 A transfer that a start for another file displaces (§5.1) _without_ `0x0C` first
-is worse off: the controller never closes it, and `0x0C` sent afterward applies
-to the new transfer, not to it. Its file stays on the drive at 0 bytes, the
-controller refuses to delete it, and every later first start request for that
-name draws `0xF7`, with nothing on the screen, until the controller restarts;
-after a restart, a start for it drew `0x00` again.
+is worse off: the controller never closes it, and `0x0C` sent afterward ends the
+new, current transfer instead, deleting that file. The displaced file stays on
+the drive at 0 bytes, the controller refuses to delete it, and every later first
+start request for that name draws `0xF7`, with nothing on the screen, until the
+controller restarts; after a restart, a start for it drew `0x00` again.
+
+So `0x0C` is safe only while the client's own transfer is the current one: after
+a start the controller accepted, and before any other start. After a refused
+start, the current transfer is still whatever the controller last accepted,
+often a completed upload, which Masso Link's `0x0C` after a refused start
+(above) therefore deletes. A client whose first start request draws `0xF7`
+cannot tell whether that file's transfer is the current one or a displaced one,
+so it cannot safely free it with `0x0C`, and sending `0x0C` on connecting, to
+end whatever an earlier run left open, would delete the file that run uploaded
+last.
 
 What the drive held afterward, read back on a PC:
 
 | Transfer                                                                       | On the drive                                                     |
 | ------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| completed, then `0x0C` with nothing sent in between                            | no file (the upload before it was kept)                          |
+| started, then `0x0C` before any chunk                                          | no file                                                          |
+| started, two of four chunks accepted, then `0x0C` and one more (refused) chunk | no file                                                          |
 | started, displaced by a start for another file before any chunk                | a 0-byte file the controller refused to delete; see `0xF7` above |
 | started while another was open (the displacing one), no chunks, then `0x0C`    | no file                                                          |
-| started, two of four chunks accepted, then `0x0C` and one more (refused) chunk | no file                                                          |
-| started, no chunks, then `0x0C`                                                | a 0-byte file (see below)                                        |
 
-The last row comes from the first probe run, whose harness misread the
-controller's replies (above), so the order of events around it is less certain
-than in the others. Still untested: whether `0x0C` ever leaves a partial file
-behind, and whether anything short of a restart frees a displaced transfer.
+Whether anything short of a restart frees a displaced transfer is untested; no
+documented packet does.
 
 (probe) Once, and not reproduced since, a start request drew no reply for 2 s;
 its resend, and the status request after it, drew identity replies (§3.1)

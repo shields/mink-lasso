@@ -438,13 +438,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // notifications (docs/protocol.md §5.5).
 func expectAborts(t *testing.T, s *sim.Controller) {
 	t.Helper()
-	expectAbortCount(t, s, 3)
-}
-
-// expectAbortCount waits for want upload-abort notifications to reach s and
-// fails if more than want have.
-func expectAbortCount(t *testing.T, s *sim.Controller, want int) {
-	t.Helper()
+	const want = 3
 	eventually(t, fmt.Sprintf("%d upload-abort notifications", want), func() bool { return s.Aborts() >= want })
 	if got := s.Aborts(); got != want {
 		t.Fatalf("Aborts() = %d, want %d", got, want)
@@ -598,13 +592,10 @@ func TestUploadStartResults(t *testing.T) {
 		name   string
 		result byte
 		want   error
-		aborts int
 	}{
-		{"no USB", masso.StartNoUSB, masso.ErrNoUSB, 3},
-		// Every start draws the result, so the one Upload sends after
-		// freeing the transfer is refused too, and aborted in turn.
-		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransferOpen, 6},
-		{"other error", 0x42, masso.ErrTransfer, 3},
+		{"no USB", masso.StartNoUSB, masso.ErrNoUSB},
+		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransferOpen},
+		{"other error", 0x42, masso.ErrTransfer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -623,7 +614,10 @@ func TestUploadStartResults(t *testing.T) {
 			if _, ok := s.File("ST.NC"); ok {
 				t.Fatal("file stored despite the refused start")
 			}
-			expectAbortCount(t, s, tc.aborts)
+			// A refused start draws no upload-abort notification.
+			if n := s.Aborts(); n != 0 {
+				t.Fatalf("Aborts() = %d, want 0", n)
+			}
 		})
 	}
 }
@@ -838,7 +832,7 @@ func leaveTransferOpen(t *testing.T, s *sim.Controller, name string, data []byte
 	})
 }
 
-func TestUploadFreesTransferLeftOpen(t *testing.T) {
+func TestUploadTransferLeftOpen(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 1})
@@ -849,19 +843,24 @@ func TestUploadFreesTransferLeftOpen(t *testing.T) {
 	data := testData(2*masso.MaxChunkData + 7)
 	leaveTransferOpen(t, s, "LEFT.NC", data, 1)
 
-	// The first start draws StartAlreadyStarted; the abort notifications
-	// free the name, and their canceled-chunk replies must not end the
-	// upload.
+	err := c.Upload(ctx, "", "LEFT.NC", bytes.NewReader(data), int64(len(data)), nil)
+	if !errors.Is(err, masso.ErrTransferOpen) {
+		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
+	}
+	if n := s.Aborts(); n != 0 {
+		t.Fatalf("Aborts() = %d, want 0", n)
+	}
+
+	s.Restart()
 	if err := c.Upload(ctx, "", "LEFT.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
-		t.Fatalf("Upload = %v, want nil", err)
+		t.Fatalf("Upload after Restart = %v, want nil", err)
 	}
 	if got, ok := s.File("LEFT.NC"); !ok || !bytes.Equal(got, data) {
 		t.Fatalf("File() = %d bytes (ok=%v), want the %d bytes sent", len(got), ok, len(data))
 	}
-	expectAborts(t, s)
 }
 
-func TestUploadDisplacedTransferNeedsRestart(t *testing.T) {
+func TestUploadDisplacedTransferKeepsTheOtherFile(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 1})
@@ -871,18 +870,45 @@ func TestUploadDisplacedTransferNeedsRestart(t *testing.T) {
 	}
 	data := testData(10)
 	leaveTransferOpen(t, s, "DISPLACED.NC", data, 0)
-	leaveTransferOpen(t, s, "OTHER.NC", data, 0)
+	if err := c.Upload(ctx, "", "OTHER.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
+		t.Fatalf("Upload(OTHER.NC) = %v, want nil", err)
+	}
 
-	// Freeing does not reach a displaced transfer: the start after it draws
-	// StartAlreadyStarted too, and is aborted in turn.
+	// The displaced file's name is stuck, and giving up on it must not
+	// delete the completed file that is now the controller's current
+	// transfer.
 	err := c.Upload(ctx, "", "DISPLACED.NC", bytes.NewReader(data), int64(len(data)), nil)
 	if !errors.Is(err, masso.ErrTransferOpen) {
-		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
+		t.Fatalf("Upload(DISPLACED.NC) = %v, want ErrTransferOpen", err)
 	}
-	expectAbortCount(t, s, 6)
+	if _, ok := s.File("OTHER.NC"); !ok {
+		t.Fatal("OTHER.NC was deleted")
+	}
 
 	s.Restart()
 	if err := c.Upload(ctx, "", "DISPLACED.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
-		t.Fatalf("Upload after Restart = %v, want nil", err)
+		t.Fatalf("Upload(DISPLACED.NC) after Restart = %v, want nil", err)
+	}
+}
+
+func TestUploadRefusedStartKeepsEarlierFile(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newSim(t, sim.Options{Serial: 1})
+	c := newTestClient(t, clock.Real{})
+	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	data := testData(10)
+	if err := c.Upload(ctx, "", "GOOD.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
+		t.Fatalf("Upload(GOOD.NC) = %v, want nil", err)
+	}
+	s.SetStartResult(0x42)
+	err := c.Upload(ctx, "", "BAD.NC", bytes.NewReader(data), int64(len(data)), nil)
+	if !errors.Is(err, masso.ErrTransfer) {
+		t.Fatalf("Upload(BAD.NC) = %v, want ErrTransfer", err)
+	}
+	if _, ok := s.File("GOOD.NC"); !ok {
+		t.Fatal("GOOD.NC was deleted after a refused start")
 	}
 }

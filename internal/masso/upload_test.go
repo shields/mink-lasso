@@ -266,24 +266,6 @@ func (h *uploadHarness) expectAborts() error {
 	return err
 }
 
-// expectRecovery asserts the three upload-abort notifications with which
-// Upload frees a transfer left open after a first-attempt
-// StartAlreadyStarted, the first being the next packet sent, then the fresh
-// start it sends AbortInterval after the last.
-func (h *uploadHarness) expectRecovery() {
-	h.t.Helper()
-	for i := range abortNotifications {
-		if i > 0 {
-			h.advanceExactlyf(h.c.abortInterval, "abort %d: sent before AbortInterval elapsed", i)
-		}
-		if req := h.next(); req != (UploadAbortRequest{}) {
-			h.t.Fatalf("abort %d: sent %#v, want UploadAbortRequest", i, req)
-		}
-	}
-	h.advanceExactlyf(h.c.abortInterval, "started again before AbortInterval elapsed")
-	h.expectStart()
-}
-
 func (h *uploadHarness) beginChunks(ctx context.Context, data []byte) {
 	h.t.Helper()
 	h.start(ctx, bytes.NewReader(data), int64(len(data)))
@@ -431,17 +413,12 @@ func TestUploadFirstAttemptAckQueuedAsResendFallsDue(t *testing.T) {
 	h.settle()
 	h.clk.Advance(time.Second)
 	// The queued ACK answered the first attempt, so it is a first-attempt
-	// StartAlreadyStarted: the next packet frees the file's transfer rather
-	// than resending the start.
-	h.expectRecovery()
-	h.ackStart(StartOK)
-	h.expectProgress(0, 1)
-	h.expectChunks(0)
-	h.ackChunk(ChunkOK, 1)
-	h.expectProgress(1, 1)
-	if err := h.wait(); err != nil {
-		t.Fatalf("Upload = %v, want nil", err)
+	// StartAlreadyStarted: Upload gives up without resending the start or
+	// sending the upload-abort notification.
+	if err := h.wait(); !errors.Is(err, ErrTransferOpen) {
+		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
 	}
+	h.expectNothingSent()
 }
 
 func TestUploadStartResendAfterSuspensionIsNotABurst(t *testing.T) {
@@ -484,6 +461,7 @@ func TestUploadStartRefused(t *testing.T) {
 		result byte
 		want   error
 	}{
+		{"already started on first attempt", StartAlreadyStarted, ErrTransferOpen},
 		{"no USB", StartNoUSB, ErrNoUSB},
 		{"other", 0x42, ErrTransfer},
 	} {
@@ -493,47 +471,13 @@ func TestUploadStartRefused(t *testing.T) {
 			h.start(t.Context(), bytes.NewReader([]byte("x")), 1)
 			h.expectStart()
 			h.ackStart(tc.result)
-			if err := h.expectAborts(); !errors.Is(err, tc.want) {
+			// A refused start draws no upload-abort notification, which
+			// would delete the controller's current, earlier transfer.
+			if err := h.wait(); !errors.Is(err, tc.want) {
 				t.Fatalf("Upload = %v, want %v", err, tc.want)
 			}
+			h.expectNothingSent()
 		})
-	}
-}
-
-func TestUploadFreesTransferLeftOpen(t *testing.T) {
-	t.Parallel()
-	h := newUploadHarness(t, Options{}, nil)
-	data := []byte("G0 X0\n")
-	h.start(t.Context(), bytes.NewReader(data), int64(len(data)))
-	h.expectStart()
-	h.ackStart(StartAlreadyStarted)
-	h.expectRecovery()
-	// The controller's canceled-chunk replies to the notifications arrive
-	// while only a start ACK is awaited, and must not end the upload.
-	for range abortNotifications {
-		h.ackChunk(ChunkCanceled, 0x52455355) // "USER"
-	}
-	h.ackStart(StartOK)
-	h.expectProgress(0, int64(len(data)))
-	h.expectChunks(0)
-	h.ackChunk(ChunkOK, 1)
-	h.expectProgress(int64(len(data)), int64(len(data)))
-	if err := h.wait(); err != nil {
-		t.Fatalf("Upload = %v, want nil", err)
-	}
-	h.expectNothingSent()
-}
-
-func TestUploadTransferStillOpenAfterFreeing(t *testing.T) {
-	t.Parallel()
-	h := newUploadHarness(t, Options{}, nil)
-	h.start(t.Context(), bytes.NewReader([]byte("x")), 1)
-	h.expectStart()
-	h.ackStart(StartAlreadyStarted)
-	h.expectRecovery()
-	h.ackStart(StartAlreadyStarted)
-	if err := h.expectAborts(); !errors.Is(err, ErrTransferOpen) {
-		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
 	}
 }
 
@@ -546,9 +490,10 @@ func TestUploadNoUSBAfterResend(t *testing.T) {
 	h.clk.Advance(time.Second)
 	h.expectStart()
 	h.ackStart(StartNoUSB)
-	if err := h.expectAborts(); !errors.Is(err, ErrNoUSB) {
+	if err := h.wait(); !errors.Is(err, ErrNoUSB) {
 		t.Fatalf("Upload = %v, want ErrNoUSB", err)
 	}
+	h.expectNothingSent()
 }
 
 func TestUploadCtxCanceledDuringStart(t *testing.T) {
