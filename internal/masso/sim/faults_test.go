@@ -16,6 +16,7 @@ package sim_test
 
 import (
 	"bytes"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -213,6 +214,9 @@ func TestSetDropStartAcks(t *testing.T) {
 
 	// Only one ACK was dropped.
 	startUpload(t, client, ctrl.Addr(), "NEXT.NC", 1)
+	if n := ctrl.StartRequests(); n != 2 {
+		t.Fatalf("StartRequests() = %d, want 2", n)
+	}
 }
 
 func TestStartResults_WhichBeginAnUpload(t *testing.T) {
@@ -271,7 +275,12 @@ func TestChunkWithNoUploadInProgress(t *testing.T) {
 	}
 }
 
-func TestUploadAbort_DiscardsUploadInProgress(t *testing.T) {
+// canceledAck is the chunk ACK a real controller sends in reply to each
+// upload-abort notification, and to any chunk after one: result
+// ChunkCanceled, with bytes 6-9 spelling "USER" (docs/protocol.md §5.5).
+var canceledAck = masso.ChunkAck{Result: masso.ChunkCanceled, Accepted: 0x52455355}
+
+func TestUploadAbort_CancelsUploadInProgress(t *testing.T) {
 	t.Parallel()
 	ctrl := newController(t, sim.Options{})
 	client := newClient(t)
@@ -283,33 +292,117 @@ func TestUploadAbort_DiscardsUploadInProgress(t *testing.T) {
 	}
 
 	mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
-	// The abort has no reply; the keepalive's reply proves it was handled.
-	mustWrite(t, client, ctrl.Addr(), masso.Keepalive(time.Now()))
-	if _, ok := readReply(t, client).(masso.Status); !ok {
-		t.Fatal("the reply after an abort was not the keepalive's status")
+	if ack := readChunkAck(t, client); ack != canceledAck {
+		t.Fatalf("reply to the abort = %+v, want %+v", ack, canceledAck)
 	}
 	if n := ctrl.Aborts(); n != 1 {
 		t.Fatalf("Aborts() = %d, want 1", n)
 	}
 
 	// Neither the rest of the aborted upload nor a restart of its chunks
-	// is stored.
-	sendChunk(t, client, ctrl.Addr(), 1, chunk)
-	if ack := readChunkAck(t, client); ack.Accepted != 0 {
-		t.Fatalf("chunk 1 ack = %+v, want Accepted 0", ack)
-	}
-	sendChunk(t, client, ctrl.Addr(), 0, chunk)
-	if ack := readChunkAck(t, client); ack.Accepted != 0 {
-		t.Fatalf("chunk 0 ack after abort = %+v, want Accepted 0", ack)
+	// is stored; each draws the canceled ACK.
+	for _, idx := range []uint32{1, 0} {
+		sendChunk(t, client, ctrl.Addr(), idx, chunk)
+		if ack := readChunkAck(t, client); ack != canceledAck {
+			t.Fatalf("chunk %d ack after the abort = %+v, want %+v", idx, ack, canceledAck)
+		}
 	}
 	if _, ok := ctrl.File("AB.NC"); ok {
 		t.Fatal("aborted upload was stored")
 	}
 
-	// A new start works normally.
+	// The abort freed the name: a new start for it works normally.
 	uploadFile(t, client, ctrl.Addr(), "AB.NC", chunk)
 	if got, ok := ctrl.File("AB.NC"); !ok || !bytes.Equal(got, chunk) {
 		t.Fatalf("File() = %q (ok=%v), want %q", got, ok, chunk)
+	}
+}
+
+func TestUploadAbort_SilencedSendsNoReply(t *testing.T) {
+	t.Parallel()
+	ctrl := newController(t, sim.Options{})
+	client := newClient(t)
+	ctrl.SetSilent(true)
+	mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
+	expectSilence(t, client, 150*time.Millisecond)
+	if n := ctrl.Aborts(); n != 1 {
+		t.Fatalf("Aborts() = %d, want 1", n)
+	}
+}
+
+// expectStartResult sends an upload-start request for a size-byte file named
+// name and asserts the result its ACK carries.
+func expectStartResult(t *testing.T, conn *net.UDPConn, addr *net.UDPAddr, name string, size int, want byte) {
+	t.Helper()
+	pkt, err := masso.UploadStart(uint32(size), "", name)
+	if err != nil {
+		t.Fatalf("UploadStart: %v", err)
+	}
+	mustWrite(t, conn, addr, pkt)
+	if reply := readReply(t, conn); reply != (masso.StartAck{Result: want}) {
+		t.Fatalf("start ack for %s = %#v, want result 0x%02X", name, reply, want)
+	}
+}
+
+func TestUploadStart_SameFileWhileOpenIsAlreadyStarted(t *testing.T) {
+	t.Parallel()
+	ctrl := newController(t, sim.Options{})
+	client := newClient(t)
+	data := bytes.Repeat([]byte("x"), masso.MaxChunkData+10)
+	startUpload(t, client, ctrl.Addr(), "OPEN.NC", len(data))
+	sendChunk(t, client, ctrl.Addr(), 0, data[:masso.MaxChunkData])
+	if ack := readChunkAck(t, client); ack.Accepted != 1 {
+		t.Fatalf("chunk 0 ack = %+v, want Accepted 1", ack)
+	}
+
+	// Another start for the open file changes nothing: the transfer goes on
+	// from where it was.
+	expectStartResult(t, client, ctrl.Addr(), "OPEN.NC", len(data), masso.StartAlreadyStarted)
+	sendChunk(t, client, ctrl.Addr(), 1, data[masso.MaxChunkData:])
+	if ack := readChunkAck(t, client); ack.Accepted != 2 {
+		t.Fatalf("chunk 1 ack = %+v, want Accepted 2", ack)
+	}
+	if got, ok := ctrl.File("OPEN.NC"); !ok || !bytes.Equal(got, data) {
+		t.Fatalf("File() = %d bytes (ok=%v), want %d", len(got), ok, len(data))
+	}
+
+	// Once the transfer is complete, a start for the same file begins anew.
+	startUpload(t, client, ctrl.Addr(), "OPEN.NC", 1)
+}
+
+func TestUploadStart_DisplacedFileStuckUntilRestart(t *testing.T) {
+	t.Parallel()
+	ctrl := newController(t, sim.Options{})
+	client := newClient(t)
+	startUpload(t, client, ctrl.Addr(), "FIRST.NC", 1)
+	startUpload(t, client, ctrl.Addr(), "SECOND.NC", 1)
+
+	// The first transfer was displaced without being closed, and neither an
+	// abort nor another file's upload frees its name.
+	expectStartResult(t, client, ctrl.Addr(), "FIRST.NC", 1, masso.StartAlreadyStarted)
+	mustWrite(t, client, ctrl.Addr(), masso.UploadAbort())
+	if ack := readChunkAck(t, client); ack != canceledAck {
+		t.Fatalf("reply to the abort = %+v, want %+v", ack, canceledAck)
+	}
+	uploadFile(t, client, ctrl.Addr(), "THIRD.NC", []byte("x"))
+	expectStartResult(t, client, ctrl.Addr(), "FIRST.NC", 1, masso.StartAlreadyStarted)
+
+	ctrl.Restart()
+	uploadFile(t, client, ctrl.Addr(), "FIRST.NC", []byte("x"))
+}
+
+func TestRestart_DiscardsUploadInProgress(t *testing.T) {
+	t.Parallel()
+	ctrl := newController(t, sim.Options{})
+	client := newClient(t)
+	startUpload(t, client, ctrl.Addr(), "GONE.NC", 1)
+	ctrl.Restart()
+	sendChunk(t, client, ctrl.Addr(), 0, []byte("x"))
+	if ack := readChunkAck(t, client); ack.Accepted != 0 {
+		t.Fatalf("chunk 0 ack after Restart = %+v, want Accepted 0", ack)
+	}
+	if _, ok := ctrl.File("GONE.NC"); ok {
+		t.Fatal("upload discarded by Restart was stored")
 	}
 }
 

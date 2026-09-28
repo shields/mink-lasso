@@ -38,6 +38,10 @@ const defaultAddr = "127.0.0.1:0"
 // overrides it.
 const defaultPrompt = 0x01
 
+// userAccepted is the accepted-count field of a canceled chunk ACK: its
+// four bytes, little-endian, spell "USER" (docs/protocol.md §5.2).
+const userAccepted = 0x52455355
+
 // Options configures New.
 type Options struct {
 	// Addr is the UDP address to listen on. Empty means "127.0.0.1:0" (a
@@ -93,7 +97,16 @@ type Controller struct {
 	acceptedCount uint32
 	seenChunk     map[uint32]bool
 	chunkRequests int
+	startRequests int
 	aborts        int
+
+	// canceled is true from an upload-abort notification until the next
+	// start begins an upload: chunks meanwhile draw a canceled ACK.
+	canceled bool
+	// stuck holds the names of transfers a start for another file
+	// displaced while they were open; a start for one draws
+	// StartAlreadyStarted until Restart (docs/protocol.md §5.5).
+	stuck map[string]bool
 
 	files map[string][]byte
 
@@ -141,6 +154,7 @@ func New(opts Options) (*Controller, error) {
 		status:           masso.Status{Prompt: defaultPrompt},
 		files:            make(map[string][]byte),
 		seenChunk:        make(map[uint32]bool),
+		stuck:            make(map[string]bool),
 		silentAfterChunk: -1,
 		done:             make(chan struct{}),
 	}
@@ -191,9 +205,9 @@ func (c *Controller) serve() {
 }
 
 // handlePacket decodes and dispatches one datagram. A malformed packet is
-// dropped without a reply. Every decoded chunk request counts toward
-// ChunkRequests and every upload-abort notification is handled, even while
-// silenced; anything else received while silenced is dropped without a
+// dropped without a reply. Every decoded start or chunk request counts
+// toward StartRequests or ChunkRequests and every upload-abort notification
+// is handled, even while silenced; anything else received while silenced is dropped without a
 // reply.
 func (c *Controller) handlePacket(pkt []byte, src net.Addr) {
 	req, err := masso.DecodeRequest(pkt)
@@ -201,14 +215,21 @@ func (c *Controller) handlePacket(pkt []byte, src net.Addr) {
 		c.logger.Debug("sim: dropping malformed packet", "error", err, "from", src)
 		return
 	}
-	if _, ok := req.(masso.UploadChunkRequest); ok {
+	switch req.(type) {
+	case masso.UploadChunkRequest:
 		c.mu.Lock()
 		c.chunkRequests++
 		c.mu.Unlock()
+	case masso.UploadStartRequest:
+		c.mu.Lock()
+		c.startRequests++
+		c.mu.Unlock()
+	default:
+		// Only start and chunk requests are counted.
 	}
 	if _, ok := req.(masso.UploadAbortRequest); ok {
 		c.logger.Info("sim: request", "type", fmt.Sprintf("%T", req), "from", src)
-		c.handleUploadAbort()
+		c.handleUploadAbort(src)
 		return
 	}
 	if c.shouldStaySilent() {
@@ -305,19 +326,30 @@ func (c *Controller) handleToolQuery(r masso.ToolQueryRequest, src net.Addr) {
 	c.send(masso.ToolRecord{Index: r.Index, Name: name}.Encode(), c.targetFor(src))
 }
 
+// handleUploadStart answers an upload-start request the way a real
+// controller does (docs/protocol.md §5.1, §5.5), unless SetStartResult has
+// forced a result. A start for a file whose transfer is still open, whether
+// the current one or one a start for another file displaced, draws
+// StartAlreadyStarted and changes nothing. Any other start begins a new
+// upload, displacing the current one, if any, without closing it, so that
+// its name is stuck until Restart.
 func (c *Controller) handleUploadStart(r masso.UploadStartRequest, src net.Addr) {
+	name := masso.JoinUploadPath(r.Path, r.Name)
 	c.mu.Lock()
 	result := c.startResult
-	c.resetUpload()
-	c.uploading = result == masso.StartOK || result == masso.StartAlreadyStarted
-	c.uploadName = masso.JoinUploadPath(r.Path, r.Name)
-	c.uploadSize = r.Size
-	if c.uploading {
-		// The final size is already known, so preallocate it rather than
-		// growing uploadData one append at a time as chunks arrive, which
-		// would otherwise reallocate and copy the whole buffer several
-		// times over the course of a large upload.
-		c.uploadData = make([]byte, 0, r.Size)
+	switch {
+	case result == masso.StartAlreadyStarted: // forced by SetStartResult
+		c.beginUpload(name, r.Size)
+	case result != masso.StartOK: // a refusal forced by SetStartResult
+		c.resetUpload()
+		c.canceled = false
+	case c.stuck[name] || (c.uploading && name == c.uploadName):
+		result = masso.StartAlreadyStarted
+	default:
+		if c.uploading {
+			c.stuck[c.uploadName] = true
+		}
+		c.beginUpload(name, r.Size)
 	}
 	dropAck := c.dropStartAcks > 0
 	if dropAck {
@@ -331,6 +363,21 @@ func (c *Controller) handleUploadStart(r masso.UploadStartRequest, src net.Addr)
 	c.send(masso.StartAck{Result: result}.Encode(), c.targetFor(src))
 }
 
+// beginUpload discards any upload in progress and begins one for a
+// size-byte file stored as name. Caller holds mu.
+func (c *Controller) beginUpload(name string, size uint32) {
+	c.resetUpload()
+	c.canceled = false
+	c.uploading = true
+	c.uploadName = name
+	c.uploadSize = size
+	// The final size is already known, so preallocate it rather than
+	// growing uploadData one append at a time as chunks arrive, which would
+	// otherwise reallocate and copy the whole buffer several times over the
+	// course of a large upload.
+	c.uploadData = make([]byte, 0, size)
+}
+
 // resetUpload discards any upload in progress. Caller holds mu.
 func (c *Controller) resetUpload() {
 	c.uploading = false
@@ -339,12 +386,21 @@ func (c *Controller) resetUpload() {
 	c.seenChunk = make(map[uint32]bool)
 }
 
-// handleUploadAbort discards any upload in progress; it sends no reply.
-func (c *Controller) handleUploadAbort() {
+// handleUploadAbort cancels any upload in progress and, unless silenced,
+// answers with a canceled chunk ACK, as a real controller does
+// (docs/protocol.md §5.5). Chunks draw that same ACK until the next start
+// begins an upload. It frees no name a displaced transfer left stuck.
+func (c *Controller) handleUploadAbort(src net.Addr) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.aborts++
 	c.resetUpload()
+	c.canceled = true
+	silent := c.silent || c.silencedByChunk
+	c.mu.Unlock()
+
+	if !silent {
+		c.send(masso.ChunkAck{Result: masso.ChunkCanceled, Accepted: userAccepted}.Encode(), c.targetFor(src))
+	}
 }
 
 // handleUploadChunk implements the chunk state machine described in the
@@ -387,6 +443,9 @@ func (c *Controller) handleUploadChunk(r masso.UploadChunkRequest, src net.Addr)
 	}
 	accepted := c.acceptedCount
 	result := c.chunkResult
+	if c.canceled {
+		result, accepted = masso.ChunkCanceled, userAccepted
+	}
 	c.mu.Unlock()
 
 	if justCompleted {
@@ -443,9 +502,11 @@ func (c *Controller) SetStatus(s masso.Status) {
 }
 
 // SetStartResult replaces the result byte sent in every future upload-start
-// ACK. The default is masso.StartOK. A start answered with anything but
-// masso.StartOK or masso.StartAlreadyStarted begins no upload, so later
-// chunks are acknowledged but not stored.
+// ACK. The default, masso.StartOK, means the Controller's own answer (see
+// Restart); any other result is sent for every start. A start answered with
+// a forced masso.StartAlreadyStarted begins an upload anyway; one answered
+// with anything else begins no upload, so later chunks are acknowledged but
+// not stored.
 func (c *Controller) SetStartResult(result byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -523,6 +584,18 @@ func (c *Controller) SetSilent(silent bool) {
 	c.silent = silent
 }
 
+// Restart frees every file name a displaced transfer left stuck and
+// discards any upload in progress, as restarting a real controller does
+// (docs/protocol.md §5.5). Unlike a real restart, it keeps the reply target,
+// the stored files, the fault settings, and the counters.
+func (c *Controller) Restart() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetUpload()
+	c.canceled = false
+	c.stuck = make(map[string]bool)
+}
+
 // Discoveries reports how many discovery requests have been answered.
 func (c *Controller) Discoveries() int {
 	c.mu.Lock()
@@ -543,6 +616,14 @@ func (c *Controller) ChunkRequests() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.chunkRequests
+}
+
+// StartRequests reports how many upload-start requests have been received,
+// including ones received while silenced.
+func (c *Controller) StartRequests() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.startRequests
 }
 
 // Aborts reports how many upload-abort notifications have been received,

@@ -810,3 +810,79 @@ func TestUploadStrayIdentityDoesNotWedge(t *testing.T) {
 		t.Fatal("stored file mismatch")
 	}
 }
+
+// leaveTransferOpen starts, from a raw socket standing in for a client that
+// then died, an upload of a size-byte file named name, and sends it
+// chunks, the first MaxChunkData-sized slices of data, so the simulator
+// holds that transfer open. Its replies go to whichever Client last
+// connected, which has nothing waiting for them.
+func leaveTransferOpen(t *testing.T, s *sim.Controller, name string, data []byte, chunks int) {
+	t.Helper()
+	starts, chunkReqs := s.StartRequests(), s.ChunkRequests()
+	raw := rawConn(t)
+	pkt, err := masso.UploadStart(uint32(len(data)), "", name)
+	if err != nil {
+		t.Fatalf("UploadStart: %v", err)
+	}
+	mustSend(t, raw, s.Addr(), pkt)
+	for i := range chunks {
+		chunk := data[i*masso.MaxChunkData : min((i+1)*masso.MaxChunkData, len(data))]
+		pkt, err := masso.UploadChunk(uint32(i), chunk)
+		if err != nil {
+			t.Fatalf("UploadChunk: %v", err)
+		}
+		mustSend(t, raw, s.Addr(), pkt)
+	}
+	eventually(t, "the open transfer's packets to reach the simulator", func() bool {
+		return s.StartRequests() == starts+1 && s.ChunkRequests() == chunkReqs+chunks
+	})
+}
+
+func TestUploadFreesTransferLeftOpen(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newSim(t, sim.Options{Serial: 1})
+	c := newTestClient(t, clock.Real{})
+	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	data := testData(2*masso.MaxChunkData + 7)
+	leaveTransferOpen(t, s, "LEFT.NC", data, 1)
+
+	// The first start draws StartAlreadyStarted; the abort notifications
+	// free the name, and their canceled-chunk replies must not end the
+	// upload.
+	if err := c.Upload(ctx, "", "LEFT.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
+		t.Fatalf("Upload = %v, want nil", err)
+	}
+	if got, ok := s.File("LEFT.NC"); !ok || !bytes.Equal(got, data) {
+		t.Fatalf("File() = %d bytes (ok=%v), want the %d bytes sent", len(got), ok, len(data))
+	}
+	expectAborts(t, s)
+}
+
+func TestUploadDisplacedTransferNeedsRestart(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newSim(t, sim.Options{Serial: 1})
+	c := newTestClient(t, clock.Real{})
+	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	data := testData(10)
+	leaveTransferOpen(t, s, "DISPLACED.NC", data, 0)
+	leaveTransferOpen(t, s, "OTHER.NC", data, 0)
+
+	// Freeing does not reach a displaced transfer: the start after it draws
+	// StartAlreadyStarted too, and is aborted in turn.
+	err := c.Upload(ctx, "", "DISPLACED.NC", bytes.NewReader(data), int64(len(data)), nil)
+	if !errors.Is(err, masso.ErrTransferOpen) {
+		t.Fatalf("Upload = %v, want ErrTransferOpen", err)
+	}
+	expectAbortCount(t, s, 6)
+
+	s.Restart()
+	if err := c.Upload(ctx, "", "DISPLACED.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
+		t.Fatalf("Upload after Restart = %v, want nil", err)
+	}
+}
