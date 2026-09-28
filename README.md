@@ -164,7 +164,9 @@ only; they are never written to the config file by themselves—but clicking
 Apply, Browse…, or the "Upload while machining" checkbox in the GUI saves the
 values currently in effect, including any active override. `-version` prints the
 version, which follows [gitcalver](https://gitcalver.org/): `20260825.2` is the
-second build from August 25, 2026 (UTC).
+second build from August 25, 2026 (UTC). The exe's Properties dialog shows the
+same product version, and file version `2026.8.25.2`, because Windows holds that
+one as four 16-bit numbers.
 
 `mink-lasso.exe` never has a console window, even with `-headless`: nothing
 reads its standard output unless the launcher redirected it, and `Ctrl+C` has
