@@ -261,20 +261,22 @@ malformed reaching it.
 Each probe sends only well-formed packets of documented types, and every file
 and folder name it uses starts with `MLTEST`, so it is easy to find and delete
 from the USB drive afterward. Every probe that opens a transfer (a start request
-the controller acknowledges) either finishes it or sends the post-transfer
-signal before it returns, even if it fails or is skipped partway through. The
-signal does not close the transfer on the controller, though
-([docs/protocol.md](docs/protocol.md) §5.5): one that does not finish stays
-open, showing "Receiving" on the controller's screen, until it is canceled there
-by hand. The status packet does not show it, so watch the screen and cancel any
-such transfer before rerunning.
+the controller accepts) finishes it by sending, in order, every chunk the
+controller has not yet accepted, even if the probe fails or is skipped partway
+through. Nothing else closes a transfer: the post-transfer signal does not
+([docs/protocol.md](docs/protocol.md) §5.5), and one left unfinished stays open,
+showing "Receiving" on the controller's screen, until it is canceled there by
+hand. If a probe cannot finish a transfer, it logs that the transfer may still
+be open; the status packet does not show it, so check the screen and cancel any
+such transfer before rerunning. Between probes, the run stops unless the
+controller answers a status request with a status reply.
 
 | Probe | What it does                                                                                                                                                                                                                            | Leaves behind                                                                                       |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | Q7/Q8 | Captures the raw identity and config replies, for the operator to read off which bits carry what                                                                                                                                        | nothing                                                                                             |
 | Q2    | Resends an upload-start request and records the reply, then finishes one file continuing from chunk 0 and a second sending chunk 1 before chunk 0                                                                                       | `MLTESTQ2A.NC`, `MLTESTQ2B.NC`                                                                      |
-| Q3    | Sends a start while another transfer is open; only if that second start is refused, sends a couple of its chunks and records their ACKs                                                                                                 | `MLTESTQ3A.NC`, `MLTESTQ3B.NC`                                                                      |
-| Q4    | Sends a few chunks, the post-transfer signal, then one more chunk                                                                                                                                                                       | `MLTESTQ4.NC` (left partial)                                                                        |
+| Q3    | Sends a start while another transfer is open; if that second start is refused, sends a couple of its chunks and records their ACKs; then finishes both transfers                                                                        | `MLTESTQ3A.NC`, `MLTESTQ3B.NC`                                                                      |
+| Q4    | Sends two chunks, the post-transfer signal, then the remaining chunks                                                                                                                                                                   | `MLTESTQ4.NC`                                                                                       |
 | Q5    | Uploads into a new, uniquely-named folder under `MLTEST\` that cannot already exist                                                                                                                                                     | an `MLTEST\MLTESTQ5-<timestamp>` folder, possibly containing `MLTESTQ5.NC`                          |
 | Q6    | Uploads into six folders under `MLTEST\` whose names probe edge cases (embedded/trailing spaces and periods, punctuation, a ~209-byte component)                                                                                        | six `MLTEST\MLTESTQ6*` folders, each possibly containing `MLTESTQ6.NC`                              |
 | Q12   | Opt-in (`MINK_LASSO_PROBE_LONG_NAMES=1`): hand-builds and sends upload-start requests for two names longer than the documented 15-character limit (16 and 33 characters), finishing the transfer only for a name the controller accepts | `MLTESTQ12-XXX.NC`, `MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC` — only with `MINK_LASSO_PROBE_LONG_NAMES=1` |
@@ -288,27 +290,18 @@ guaranteed:
 
 - `MLTESTQ2A.NC` — ordinarily a complete one-chunk file, sent after the
   deliberate resend; absent if the first start was refused.
-- `MLTESTQ2B.NC` — complete, partial, or absent, depending on whether the
-  controller accepts chunk 0 after chunk 1 arrived first; this is extra
-  information from reusing the same resend setup, not itself one of
-  docs/protocol-questions.md's numbered questions. Absent if the first start was
-  refused.
-- `MLTESTQ3A.NC` — opened but never chunked, then closed with the post-transfer
-  signal; what that leaves behind is itself an open question
-  (docs/protocol-questions.md Q4).
-- `MLTESTQ3B.NC` — if a start sent while another transfer was open was accepted
-  (question 3 not exercised that run), it is opened but never chunked, then
-  closed only with the post-transfer signal, exactly like `MLTESTQ3A.NC` above:
-  what that leaves behind is itself an open question (docs/protocol-questions.md
-  Q4). If that second start was refused instead, the probe also sends chunks 0
-  and 1 to see whether the controller stores them anyway — but either way it
-  then closes with the post-transfer signal too, just like the accepted branch.
-  So in the refused case this file's final state depends on both questions, not
-  question 3 alone: whether the controller stored chunks sent after a refused
-  start (docs/protocol-questions.md Q3), and what the post-transfer signal that
-  follows then does to them (docs/protocol-questions.md Q4).
-- `MLTESTQ4.NC` — always partial: only chunks 0-2 of 4 are ever sent, and the
-  post-transfer signal goes out after chunk 1.
+- `MLTESTQ2B.NC` — ordinarily complete: after sending chunk 1 before chunk 0,
+  the probe finishes the file in order. Absent if the first start was refused.
+- `MLTESTQ3A.NC` — opened, then left while `MLTESTQ3B.NC` was started, then
+  finished if the controller still had it open; if it did not, the probe logs
+  that it could not finish it, and it may be partial or absent.
+- `MLTESTQ3B.NC` — complete if the second start was accepted (question 3 not
+  exercised that run). If that start was refused instead, the probe sends chunks
+  0 and 1 to see whether the controller stores them anyway
+  (docs/protocol-questions.md Q3), so the file may be complete, partial, or
+  absent.
+- `MLTESTQ4.NC` — complete if the controller stores chunks sent after the
+  post-transfer signal, otherwise partial (docs/protocol-questions.md Q4).
 - the `MLTEST\MLTESTQ5-<timestamp>` folder, and `MLTESTQ5.NC` inside it —
   present or absent depending on whether the controller creates a missing
   directory (docs/protocol-questions.md Q5).

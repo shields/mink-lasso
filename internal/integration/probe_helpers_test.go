@@ -307,51 +307,55 @@ func (h *probeHarness) requireStatusReply(t *testing.T, after string) masso.Stat
 	return st
 }
 
-// probeTransfer tracks one upload-start request from the moment it is
-// sent, so that a t.Cleanup registered at the same time can send the
-// post-transfer signal (docs/protocol.md §5.5) if the calling probe fails
-// or is skipped before deciding for itself whether one is needed. It is
-// created only by probeHarness.startTransfer; every other action within the
-// same transfer (a resend, a chunk, an explicit abort or finish) goes
-// through the probeHarness and the *probeTransfer startTransfer returned,
-// not a new one.
+// probeTransfer tracks one upload a probe has started, so that it can be
+// finished rather than left open. The post-transfer signal does not end a
+// transfer on the controller (docs/protocol.md §5.5), and neither does
+// anything else a client can send: an unfinished one stays open, showing
+// "Receiving" on the controller's screen, until canceled there by hand. So
+// a probe closes every transfer it opens by sending the chunks the
+// controller still lacks, in order (finish), and a t.Cleanup registered with
+// the transfer does the same if the probe fails or is skipped first. It is
+// created only by probeHarness.startTransfer or startTransferOptional.
 type probeTransfer struct {
-	h      *probeHarness
-	opened bool // a start-ACK reply of any content has arrived
-	closed bool // no (more) signal is needed: finished cleanly, or already sent
+	h     *probeHarness
+	data  []byte
+	total uint32
+	// accepted is the controller's accepted-chunk count from its last
+	// successful chunk ACK.
+	accepted uint32
+	// open is true while the controller has this transfer open: from a
+	// StartOK reply until every chunk is accepted or a chunk ACK reports an
+	// error.
+	open bool
 }
 
-// registerTransfer creates a probeTransfer and registers its safety-net
-// cleanup before anything is known about whether the start request it will
-// cover draws a reply at all — docs/protocol.md §5.5 sends the signal only
-// once a start reply has arrived, so the cleanup checks tr.opened itself
-// rather than assuming it.
-func (h *probeHarness) registerTransfer(t *testing.T) *probeTransfer {
+// registerTransfer creates a probeTransfer for data and registers its
+// safety-net cleanup, which finishes the transfer if it is still open when
+// the test ends.
+func (h *probeHarness) registerTransfer(t *testing.T, data []byte) *probeTransfer {
 	t.Helper()
 
-	tr := &probeTransfer{h: h}
+	tr := &probeTransfer{h: h, data: data, total: chunkCount(len(data))}
 	t.Cleanup(func() {
-		if tr.opened && !tr.closed {
-			tr.closed = true
-			h.sendAbortSignal(t)
+		if tr.open {
+			tr.finish(t, "PROBE cleanup")
 		}
 	})
 
 	return tr
 }
 
-// startTransfer sends pkt — an upload-start request — and returns a
-// probeTransfer covering it, already registered per registerTransfer. It
-// fails the test if no ACK arrives at all, since every caller needs the
-// ACK's content to continue; per docs/protocol.md §5.5, a start that drew
-// no reply needs no post-transfer signal, so the cleanup this registers
-// stays inert in that case.
-func (h *probeHarness) startTransfer(t *testing.T, pkt []byte) (*probeTransfer, []byte) {
+// startTransfer sends pkt, an upload-start request for data, and returns a
+// probeTransfer covering it, already registered per registerTransfer, along
+// with the raw reply. It fails the test if no reply arrives at all, since
+// every caller needs the reply's content to continue. The transfer counts
+// as open only if the reply is a start ACK carrying StartOK.
+func (h *probeHarness) startTransfer(t *testing.T, pkt, data []byte) (*probeTransfer, []byte) {
 	t.Helper()
 
-	tr := h.registerTransfer(t)
+	tr := h.registerTransfer(t, data)
 	raw := h.roundTrip(t, pkt)
-	tr.opened = true
+	tr.open = startAccepted(raw)
 
 	return tr, raw
 }
@@ -359,52 +363,95 @@ func (h *probeHarness) startTransfer(t *testing.T, pkt []byte) (*probeTransfer, 
 // startTransferOptional behaves like startTransfer, but a start request
 // that draws no reply at all is returned as ok == false instead of failing
 // the test, for a start docs/protocol.md gives no assurance the controller
-// answers, where that silence is itself an observation. tr is registered
-// either way, so the usual cleanup still applies once tr.opened is true.
-func (h *probeHarness) startTransferOptional(t *testing.T, pkt []byte) (tr *probeTransfer, raw []byte, ok bool) {
+// answers, where that silence is itself an observation.
+func (h *probeHarness) startTransferOptional(t *testing.T, pkt, data []byte) (tr *probeTransfer, raw []byte, ok bool) {
 	t.Helper()
 
-	tr = h.registerTransfer(t)
+	tr = h.registerTransfer(t, data)
 	raw, ok = h.tryRoundTrip(t, pkt)
-	tr.opened = ok
+	tr.open = ok && startAccepted(raw)
 
 	return tr, raw, ok
 }
 
-// abort sends the post-transfer signal for tr now and marks it closed, so
-// neither the safety-net cleanup nor a later call here sends it again. It
-// is a no-op if tr is already closed.
+// startAccepted reports whether raw is a start ACK carrying StartOK.
+func startAccepted(raw []byte) bool {
+	reply, err := masso.DecodeReply(raw)
+	if err != nil {
+		return false
+	}
+
+	ack, ok := reply.(masso.StartAck)
+
+	return ok && ack.Result == masso.StartOK
+}
+
+// chunk sends chunk index of tr's data and returns the controller's chunk
+// ACK, as observeChunk does, and folds it into tr: a successful ACK updates
+// the accepted count, closing the transfer once every chunk is in, and an
+// error ACK closes it.
+func (tr *probeTransfer) chunk(t *testing.T, tag, label string, index uint32) (masso.ChunkAck, bool) {
+	t.Helper()
+
+	ack, ok := tr.h.observeChunk(t, tag, label, tr.data, index)
+	if !ok {
+		return ack, false
+	}
+
+	switch {
+	case ack.Result != masso.ChunkOK:
+		tr.open = false
+	case ack.Accepted <= tr.total:
+		tr.accepted = max(tr.accepted, ack.Accepted)
+		if tr.accepted == tr.total {
+			tr.open = false
+		}
+	default:
+		// An accepted count above the file's chunk count is not a count
+		// at all (a canceled ACK's USER bytes, say); leave tr as it was.
+	}
+
+	return ack, true
+}
+
+// finish sends, in order, every chunk the controller has not yet accepted,
+// and reports whether the transfer completed. It stops early, logging that
+// the transfer may still be open on the controller, if a chunk draws no
+// usable reply or does not advance the accepted count; a chunk ACK with an
+// error result ends it too, since that closes the transfer. It does nothing
+// for a transfer that is not open.
+func (tr *probeTransfer) finish(t *testing.T, tag string) bool {
+	t.Helper()
+
+	for tr.open {
+		idx := tr.accepted
+		ack, ok := tr.chunk(t, tag, fmt.Sprintf("chunk %d ACK, finishing the transfer", idx), idx)
+		if !ok || (ack.Result == masso.ChunkOK && tr.open && tr.accepted == idx) {
+			t.Logf("%s: could not finish the transfer (%d/%d chunks accepted); it may still be open "+
+				"on the controller: check its screen and cancel it before rerunning", tag, tr.accepted, tr.total)
+			tr.open = false // handed to the operator; the cleanup would only fail the same way again
+
+			return false
+		}
+	}
+
+	if tr.accepted < tr.total {
+		t.Logf("%s: transfer ended incomplete (%d/%d chunks accepted)", tag, tr.accepted, tr.total)
+
+		return false
+	}
+
+	t.Logf("%s: transfer complete (%d/%d chunks accepted)", tag, tr.accepted, tr.total)
+
+	return true
+}
+
+// abort sends the post-transfer signal for tr (docs/protocol.md §5.5). It
+// does not close the transfer, so tr stays open and finish still applies.
 func (tr *probeTransfer) abort(t *testing.T) {
 	t.Helper()
 
-	if tr.closed {
-		return
-	}
-
-	tr.closed = true
 	tr.h.sendAbortSignal(t)
-}
-
-// finishOrAbort logs whether tr's transfer completed (last, the most recent
-// chunk ACK, reports success and accepted >= total chunks) and, if not,
-// aborts it so nothing is left open on the controller (docs/protocol.md
-// §5.5). It reports whether the transfer completed. An error ACK's accepted
-// count never counts as completion, per §5.2.
-func (tr *probeTransfer) finishOrAbort(t *testing.T, tag string, last masso.ChunkAck, total uint32) bool {
-	t.Helper()
-
-	if last.Result == masso.ChunkOK && last.Accepted >= total {
-		t.Logf("%s: transfer complete (%d/%d chunks accepted); no signal needed", tag, last.Accepted, total)
-		tr.closed = true
-
-		return true
-	}
-
-	t.Logf("%s: transfer incomplete (result=0x%02X, %d/%d chunks accepted); sending the post-transfer signal",
-		tag, last.Result, last.Accepted, total)
-	tr.abort(t)
-
-	return false
 }
 
 // logPacket logs a reply both decoded and as hex, prefixed with tag and
@@ -447,41 +494,6 @@ func describeReply(r masso.Reply) string {
 	}
 }
 
-// decodeStartAck decodes raw as a masso.StartAck, failing the test if it
-// decodes to anything else.
-func decodeStartAck(t *testing.T, raw []byte) masso.StartAck {
-	t.Helper()
-
-	reply, err := masso.DecodeReply(raw)
-	if err != nil {
-		t.Fatalf("decoding start ACK: %v", err)
-	}
-
-	ack, ok := reply.(masso.StartAck)
-	if !ok {
-		t.Fatalf("expected a start ACK, got %T", reply)
-	}
-
-	return ack
-}
-
-// decodeStartAckOptional behaves like decodeStartAck but reports a failure
-// to decode as ok == false instead of failing the test, for a start whose
-// reply docs/protocol.md gives no assurance takes the normal 10-byte
-// start-ACK shape, where an odd-shaped reply is itself an observation.
-func decodeStartAckOptional(t *testing.T, raw []byte) (ack masso.StartAck, ok bool) {
-	t.Helper()
-
-	reply, err := masso.DecodeReply(raw)
-	if err != nil {
-		return masso.StartAck{}, false
-	}
-
-	ack, ok = reply.(masso.StartAck)
-
-	return ack, ok
-}
-
 // observeChunk sends chunk index of data and returns the controller's chunk
 // ACK, or ok == false when none came or the reply did not decode as one,
 // either of which it logs: in a probe of behavior docs/protocol.md leaves
@@ -518,24 +530,6 @@ func decodeChunkAckOptional(raw []byte) (masso.ChunkAck, bool) {
 	ack, ok := reply.(masso.ChunkAck)
 
 	return ack, ok
-}
-
-// decodeChunkAck decodes raw as a masso.ChunkAck, failing the test if it
-// decodes to anything else.
-func decodeChunkAck(t *testing.T, raw []byte) masso.ChunkAck {
-	t.Helper()
-
-	reply, err := masso.DecodeReply(raw)
-	if err != nil {
-		t.Fatalf("decoding chunk ACK: %v", err)
-	}
-
-	ack, ok := reply.(masso.ChunkAck)
-	if !ok {
-		t.Fatalf("expected a chunk ACK, got %T", reply)
-	}
-
-	return ack
 }
 
 // chunkCount returns the number of MaxChunkData-sized chunks a size-byte

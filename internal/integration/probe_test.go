@@ -122,20 +122,17 @@ func probeQ2ContinueFromChunk0(t *testing.T, h *probeHarness) {
 	const name = "MLTESTQ2A.NC"
 
 	data := nChunkFileData("q2a", 1)
-	total := chunkCount(len(data))
 
 	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
 	if err != nil {
 		t.Fatalf("PROBE Q2: building start request: %v", err)
 	}
 
-	tr, raw := h.startTransfer(t, startPkt)
+	tr, raw := h.startTransfer(t, startPkt, data)
 	logPacket(t, "PROBE Q2", "first start ACK ("+name+")", raw)
 
-	ack := decodeStartAck(t, raw)
-	if ack.Result != masso.StartOK {
-		tr.abort(t)
-		t.Skipf("PROBE Q2: first start refused (0x%02X); cannot test a resend", ack.Result)
+	if !tr.open {
+		t.Skip("PROBE Q2: first start not accepted; cannot test a resend")
 	}
 
 	h.drain(t)
@@ -150,43 +147,31 @@ func probeQ2ContinueFromChunk0(t *testing.T, h *probeHarness) {
 		t.Logf("PROBE Q2: no reply to the resent start within %s", probeReplyWait)
 	}
 
-	cack, ok := h.observeChunk(t, "PROBE Q2", "chunk 0 ACK after the resend ("+name+")", data, 0)
-	if !ok {
-		tr.abort(t)
-
-		return
-	}
-
-	tr.finishOrAbort(t, "PROBE Q2 "+name, cack, total)
+	tr.chunk(t, "PROBE Q2", "chunk 0 ACK after the resend ("+name+")", 0)
+	tr.finish(t, "PROBE Q2 "+name)
 }
 
 // probeQ2ChunkOutOfOrder is not itself tied to a numbered question in
-// docs/protocol-questions.md: Q2 asks only whether a resent start draws an
-// 0xF7 reply and expects resumption at chunk 0, which
-// probeQ2ContinueFromChunk0 covers directly. This reuses the same
-// start-then-resend setup to also observe, as extra information rather than
-// an answer to Q2, what the controller does when chunk 1 arrives before
-// chunk 0.
+// docs/protocol-questions.md. It reuses probeQ2ContinueFromChunk0's
+// start-then-resend setup to observe what the controller does when chunk 1
+// arrives before chunk 0, then finishes the transfer in order.
 func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 	t.Helper()
 
 	const name = "MLTESTQ2B.NC"
 
 	data := nChunkFileData("q2b", 2)
-	total := chunkCount(len(data))
 
 	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
 	if err != nil {
 		t.Fatalf("PROBE Q2: building start request: %v", err)
 	}
 
-	tr, raw := h.startTransfer(t, startPkt)
+	tr, raw := h.startTransfer(t, startPkt, data)
 	logPacket(t, "PROBE Q2", "first start ACK ("+name+")", raw)
 
-	ack := decodeStartAck(t, raw)
-	if ack.Result != masso.StartOK {
-		tr.abort(t)
-		t.Skipf("PROBE Q2: first start refused (0x%02X); cannot test the out-of-order case", ack.Result)
+	if !tr.open {
+		t.Skip("PROBE Q2: first start not accepted; cannot test the out-of-order case")
 	}
 
 	h.drain(t)
@@ -200,19 +185,15 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 		t.Logf("PROBE Q2: no reply to the resent start within %s", probeReplyWait)
 	}
 
-	if ack1, ok := h.observeChunk(t, "PROBE Q2", "chunk 1 ACK, sent before chunk 0 ("+name+")", data, 1); ok {
-		t.Logf("PROBE Q2: after chunk 1: accepted=%d/%d", ack1.Accepted, total)
+	if ack1, ok := tr.chunk(t, "PROBE Q2", "chunk 1 ACK, sent before chunk 0 ("+name+")", 1); ok {
+		t.Logf("PROBE Q2: after chunk 1: accepted=%d/%d", ack1.Accepted, tr.total)
 	}
 
-	ack0, ok := h.observeChunk(t, "PROBE Q2", "chunk 0 ACK, sent after chunk 1 ("+name+")", data, 0)
-	if !ok {
-		tr.abort(t)
-
-		return
+	if ack0, ok := tr.chunk(t, "PROBE Q2", "chunk 0 ACK, sent after chunk 1 ("+name+")", 0); ok {
+		t.Logf("PROBE Q2: after chunk 0: accepted=%d/%d", ack0.Accepted, tr.total)
 	}
 
-	t.Logf("PROBE Q2: after chunk 0: accepted=%d/%d", ack0.Accepted, total)
-	tr.finishOrAbort(t, "PROBE Q2 "+name, ack0, total)
+	tr.finish(t, "PROBE Q2 "+name)
 }
 
 // probeQ3 addresses docs/protocol-questions.md Q3: whether the controller
@@ -223,15 +204,13 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 // than removing the USB drive by hand (0xE9), which this probe cannot do
 // for itself — the status packet (§4) carries nothing that would let it
 // detect the drive's removal, so it only logs that as a manual alternative
-// below. Absent that, the least risky candidate this probe can try on its
-// own, while staying within documented packet types, is a start sent while
-// another transfer is open: a second, different upload-start request sent
-// before the first is ever chunked. docs/protocol.md gives no assurance the
-// controller refuses this, so the result is logged as an observation, not
-// asserted: refused, the probe goes on to send chunks and records their
-// ACKs, which answers question 3; accepted, question 3 is not exercised
-// this run. Either way, both transfers this probe opened are closed
-// (probeTransfer.abort) before it returns.
+// below. It also tries a start sent while another transfer is open: a
+// second, different upload-start request sent before the first is ever
+// chunked. docs/protocol.md §5.1 records that the controller accepts that
+// one, so unless the controller behaves differently this run, question 3 is
+// not exercised; either way, the probe then finishes the second transfer
+// and tries to finish the first, which shows whether the first is still
+// open after the second began.
 func probeQ3(t *testing.T, h *probeHarness) {
 	t.Helper()
 
@@ -246,110 +225,90 @@ func probeQ3(t *testing.T, h *probeHarness) {
 		t.Fatalf("PROBE Q3: building first start request: %v", err)
 	}
 
-	trA, rawA := h.startTransfer(t, startA)
+	trA, rawA := h.startTransfer(t, startA, dataA)
 	logPacket(t, "PROBE Q3", "first start ACK (MLTESTQ3A.NC)", rawA)
 
-	ackA := decodeStartAck(t, rawA)
-	if ackA.Result != masso.StartOK {
-		trA.abort(t)
-		t.Skipf("PROBE Q3: first start refused (0x%02X); nothing is open to send a second start against", ackA.Result)
+	if !trA.open {
+		t.Skip("PROBE Q3: first start not accepted; nothing is open to send a second start against")
 	}
 
 	dataB := nChunkFileData("q3b", 2)
-	total := chunkCount(len(dataB))
 
 	startB, err := masso.UploadStart(uint32(len(dataB)&0xFFFFFFFF), "", "MLTESTQ3B.NC")
 	if err != nil {
 		t.Fatalf("PROBE Q3: building second start request: %v", err)
 	}
 
-	// Unlike the first start above, docs/protocol.md gives no assurance the
-	// controller replies to a start sent while another transfer is open at
-	// all: silence here is itself an answer to question 3, not a harness
-	// failure, so this uses the Optional variant rather than failing the
-	// test outright.
-	trB, rawB, ok := h.startTransferOptional(t, startB)
+	// docs/protocol.md gives no assurance the controller replies to a start
+	// sent while another transfer is open, so silence here is an
+	// observation, not a harness failure.
+	trB, rawB, ok := h.startTransferOptional(t, startB, dataB)
 	if !ok {
 		t.Logf("PROBE Q3: no reply to a start sent while another transfer was open within %s; "+
 			"question 3 was not exercised this run", probeReplyWait)
-		trA.abort(t)
+		trA.finish(t, "PROBE Q3 MLTESTQ3A.NC")
 
 		return
 	}
 
 	logPacket(t, "PROBE Q3", "second start ACK, a start sent while another transfer is open (MLTESTQ3B.NC)", rawB)
 
-	ackB, ok := decodeStartAckOptional(t, rawB)
-	switch {
-	case !ok:
-		t.Log("PROBE Q3: reply to a start sent while another transfer was open did not decode as a normal start ACK")
-	case ackB.Result == masso.StartOK:
+	if trB.open {
 		t.Log("PROBE Q3: a start sent while another transfer was open was accepted; question 3 was not exercised this run")
-	default:
-		t.Logf("PROBE Q3: a start sent while another transfer was open was refused (0x%02X); "+
-			"sending chunks to see whether the controller stores them anyway", ackB.Result)
+		trB.finish(t, "PROBE Q3 MLTESTQ3B.NC")
+	} else {
+		t.Log("PROBE Q3: a start sent while another transfer was open was not accepted; " +
+			"sending its chunks to see whether the controller stores them anyway")
 
 		for _, idx := range []uint32{0, 1} {
 			// Whether the controller ACKs a chunk for a refused start is
-			// exactly what this probe observes, so observeChunk logs a
-			// missing or odd-shaped reply rather than failing.
+			// exactly what this probe observes, so chunk logs a missing or
+			// odd-shaped reply rather than failing.
 			label := fmt.Sprintf("chunk %d ACK after the refused start", idx)
-			if ack, ok := h.observeChunk(t, "PROBE Q3", label, dataB, idx); ok {
-				t.Logf("PROBE Q3: after chunk %d: accepted=%d/%d", idx, ack.Accepted, total)
+			if ack, ok := trB.chunk(t, "PROBE Q3", label, idx); ok {
+				t.Logf("PROBE Q3: after chunk %d: accepted=%d/%d", idx, ack.Accepted, trB.total)
 			}
 		}
 	}
 
-	trB.abort(t)
-	trA.abort(t)
+	// The first transfer's chunk ACK shows whether the controller still
+	// had it open after the second start.
+	trA.finish(t, "PROBE Q3 MLTESTQ3A.NC")
 }
 
-// probeQ4 addresses docs/protocol-questions.md Q4: what accepted count, if
-// any, the controller reports for a chunk sent after the post-transfer
-// signal.
+// probeQ4 addresses docs/protocol-questions.md Q4: whether the controller
+// stores chunks sent after the post-transfer signal, and what accepted count
+// it reports for them. It sends two chunks, the signal, then finishes the
+// transfer, logging each ACK.
 func probeQ4(t *testing.T, h *probeHarness) {
 	t.Helper()
 
 	data := nChunkFileData("q4", 4)
-	total := chunkCount(len(data))
 
 	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", "MLTESTQ4.NC")
 	if err != nil {
 		t.Fatalf("PROBE Q4: building start request: %v", err)
 	}
 
-	tr, raw := h.startTransfer(t, startPkt)
+	tr, raw := h.startTransfer(t, startPkt, data)
 	logPacket(t, "PROBE Q4", "start ACK", raw)
 
-	ack := decodeStartAck(t, raw)
-	if ack.Result != masso.StartOK {
-		tr.abort(t)
-		t.Skipf("PROBE Q4: start refused (0x%02X); cannot test the post-signal chunk", ack.Result)
+	if !tr.open {
+		t.Skip("PROBE Q4: start not accepted; cannot test chunks after the signal")
 	}
 
-	var lastAccepted uint32
 	for _, idx := range []uint32{0, 1} {
-		chunkRaw := h.roundTrip(t, chunkPkt(t, data, idx))
-		logPacket(t, "PROBE Q4", fmt.Sprintf("chunk %d ACK", idx), chunkRaw)
-
-		cack := decodeChunkAck(t, chunkRaw)
-		lastAccepted = cack.Accepted
-
-		t.Logf("PROBE Q4: after chunk %d: accepted=%d/%d", idx, cack.Accepted, total)
+		if ack, ok := tr.chunk(t, "PROBE Q4", fmt.Sprintf("chunk %d ACK", idx), idx); ok {
+			t.Logf("PROBE Q4: after chunk %d: accepted=%d/%d", idx, ack.Accepted, tr.total)
+		}
 	}
 
 	t.Logf("PROBE Q4: sending the post-transfer signal mid-transfer (docs/protocol.md §5.5); accepted so far=%d/%d",
-		lastAccepted, total)
+		tr.accepted, tr.total)
 	tr.abort(t)
 
-	// What the controller does with a chunk sent after 0x0C is Q4 itself, and
-	// no reply, or an odd-shaped one, is among the plausible answers, so
-	// observeChunk logs it rather than failing the test.
-	label := "chunk 2 ACK, sent after the post-transfer signal"
-	if nextAck, ok := h.observeChunk(t, "PROBE Q4", label, data, 2); ok {
-		t.Logf("PROBE Q4: after the signal, chunk 2: result=0x%02X accepted=%d/%d",
-			nextAck.Result, nextAck.Accepted, total)
-	}
+	// What the controller does with chunks sent after 0x0C is Q4 itself.
+	tr.finish(t, "PROBE Q4 after the signal")
 }
 
 // probeQ5 addresses docs/protocol-questions.md Q5: whether the controller
@@ -363,7 +322,6 @@ func probeQ5(t *testing.T, h *probeHarness) {
 	dir := `MLTEST\` + dirName
 
 	data := nChunkFileData("q5", 1)
-	total := chunkCount(len(data))
 
 	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), dir, "MLTESTQ5.NC")
 	if err != nil {
@@ -371,9 +329,9 @@ func probeQ5(t *testing.T, h *probeHarness) {
 	}
 
 	// docs/protocol.md gives no assurance a start naming a missing directory
-	// draws a reply at all, so this uses the Optional variant: silence here
-	// is itself an observation, not a harness failure.
-	tr, raw, ok := h.startTransferOptional(t, startPkt)
+	// draws a reply at all, so silence here is an observation, not a harness
+	// failure.
+	tr, raw, ok := h.startTransferOptional(t, startPkt, data)
 	if !ok {
 		t.Logf("PROBE Q5: no reply to the start request for %q within %s; "+
 			"check the controller's file browser for %s\\MLTESTQ5.NC", dir, probeReplyWait, dir)
@@ -383,26 +341,12 @@ func probeQ5(t *testing.T, h *probeHarness) {
 
 	logPacket(t, "PROBE Q5", fmt.Sprintf("start ACK for new folder %q", dir), raw)
 
-	ack := decodeStartAck(t, raw)
-
-	// Unlike the sibling probes, chunk 0 goes out regardless of ack.Result:
-	// Q5 asks whether a missing-directory result shows up in the start ACK or
-	// the first chunk ACK, so a refused start is itself an observation this
-	// probe needs, not a reason to stop short of chunking.
-	cack, ok := h.observeChunk(t, "PROBE Q5", fmt.Sprintf("chunk 0 ACK for %q", dir), data, 0)
-	if !ok {
-		t.Logf("PROBE Q5: start result=0x%02X, no chunk 0 ACK; "+
-			"check the controller's file browser for %s\\MLTESTQ5.NC", ack.Result, dir)
-		tr.abort(t)
-
-		return
-	}
-
-	t.Logf("PROBE Q5: start result=0x%02X, chunk 0 result=0x%02X accepted=%d/%d; "+
-		"check the controller's file browser for %s\\MLTESTQ5.NC",
-		ack.Result, cack.Result, cack.Accepted, total, dir)
-
-	tr.finishOrAbort(t, "PROBE Q5 "+dir, cack, total)
+	// Unlike the sibling probes, chunk 0 goes out even if the start was not
+	// accepted: Q5 asks whether a missing-directory result shows up in the
+	// start ACK or the first chunk ACK.
+	tr.chunk(t, "PROBE Q5", fmt.Sprintf("chunk 0 ACK for %q", dir), 0)
+	tr.finish(t, "PROBE Q5 "+dir)
+	t.Logf("PROBE Q5: check the controller's file browser for %s\\MLTESTQ5.NC", dir)
 }
 
 // probeQ6DirEntry is one row of probeQ6's directory-name table: a folder
@@ -429,7 +373,6 @@ func probeQ6(t *testing.T, h *probeHarness) {
 	}
 
 	data := nChunkFileData("q6", 1)
-	total := chunkCount(len(data))
 
 	for i, e := range table {
 		dir := `MLTEST\` + e.component
@@ -441,10 +384,9 @@ func probeQ6(t *testing.T, h *probeHarness) {
 		}
 
 		// docs/protocol.md gives no assurance a start naming an edge-case
-		// directory component draws a reply at all, so this uses the
-		// Optional variant: silence here is itself an observation, not a
-		// harness failure.
-		tr, raw, ok := h.startTransferOptional(t, startPkt)
+		// directory component draws a reply at all, so silence here is an
+		// observation, not a harness failure.
+		tr, raw, ok := h.startTransferOptional(t, startPkt, data)
 		if !ok {
 			t.Logf("PROBE Q6: %q: no reply to the start request within %s; skipping this entry", dir, probeReplyWait)
 
@@ -453,22 +395,13 @@ func probeQ6(t *testing.T, h *probeHarness) {
 
 		logPacket(t, "PROBE Q6", fmt.Sprintf("start ACK for %q (%s)", dir, e.note), raw)
 
-		ack := decodeStartAck(t, raw)
-		if ack.Result != masso.StartOK {
-			tr.abort(t)
-			t.Logf("PROBE Q6: %q: start refused (0x%02X); skipping the chunk for this entry", dir, ack.Result)
+		if !tr.open {
+			t.Logf("PROBE Q6: %q: start not accepted; skipping the chunk for this entry", dir)
 
 			continue
 		}
 
-		cack, ok := h.observeChunk(t, "PROBE Q6", fmt.Sprintf("chunk 0 ACK for %q", dir), data, 0)
-		if !ok {
-			tr.abort(t)
-
-			continue
-		}
-
-		tr.finishOrAbort(t, fmt.Sprintf("PROBE Q6 %q", dir), cack, total)
+		tr.finish(t, fmt.Sprintf("PROBE Q6 %q", dir))
 	}
 }
 
@@ -512,14 +445,13 @@ func probeQ12Upload(t *testing.T, h *probeHarness, name string) (accepted, compl
 	t.Helper()
 
 	data := nChunkFileData("q12", 1)
-	total := chunkCount(len(data))
 
 	startPkt, err := buildUploadStartRequest(uint32(len(data)&0xFFFFFFFF), "", name)
 	if err != nil {
 		t.Fatalf("PROBE Q12: building start request for %q: %v", name, err)
 	}
 
-	tr, raw, ok := h.startTransferOptional(t, startPkt)
+	tr, raw, ok := h.startTransferOptional(t, startPkt, data)
 	if !ok {
 		t.Logf("PROBE Q12: no reply to the start request for %q (%d characters) within %s", name, len(name), probeReplyWait)
 		return false, false
@@ -527,33 +459,17 @@ func probeQ12Upload(t *testing.T, h *probeHarness, name string) (accepted, compl
 
 	logPacket(t, "PROBE Q12", fmt.Sprintf("start ACK for %q (%d characters)", name, len(name)), raw)
 
-	// A reply that does not decode as a normal 10-byte start ACK is itself
-	// an observation here, not a harness failure: no version of Masso Link
-	// ever asks for a name this long, so docs/protocol.md gives no
-	// assurance the reply to this specific request takes the usual shape.
-	ack, ok := decodeStartAckOptional(t, raw)
-	if !ok {
-		t.Logf("PROBE Q12: %q: reply to the start request did not decode as a normal start ACK", name)
-		tr.abort(t)
+	// A reply that is not a StartOK start ACK, including one that does not
+	// decode as a start ACK at all, is an observation here, not a harness
+	// failure: no version of Masso Link ever asks for a name this long, so
+	// docs/protocol.md gives no assurance the reply takes the usual shape.
+	if !tr.open {
+		t.Logf("PROBE Q12: %q: start not accepted", name)
 
 		return false, false
 	}
 
-	if ack.Result != masso.StartOK {
-		tr.abort(t)
-		t.Logf("PROBE Q12: %q: start refused (0x%02X)", name, ack.Result)
-
-		return false, false
-	}
-
-	cack, ok := h.observeChunk(t, "PROBE Q12", fmt.Sprintf("chunk 0 ACK for %q", name), data, 0)
-	if !ok {
-		tr.abort(t)
-
-		return true, false
-	}
-
-	return true, tr.finishOrAbort(t, "PROBE Q12 "+name, cack, total)
+	return true, tr.finish(t, "PROBE Q12 "+name)
 }
 
 // probeQ12Result is what probeQ12 hands to probeQ9: an explicit record of
