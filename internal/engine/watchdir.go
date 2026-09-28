@@ -254,9 +254,9 @@ func (e *Engine) SendFile(path string) error {
 	if watchDir != "" {
 		// watchDir can be relative (the -watch flag and a config file's
 		// watchDir are taken as given), while path is always the absolute
-		// path a file-open dialog returns; RelDir compares the two
-		// lexically, so both must be resolved against the same base or a
-		// relative watch folder would never match and every send inside it
+		// path a file-open dialog returns; both must be resolved against
+		// the same base for RelDir's path comparison or a relative watch
+		// folder would never match and every send inside it
 		// would silently fall back to the root-level routing below.
 		if absWatchDir, absErr := filepath.Abs(watchDir); absErr == nil {
 			if absPath, absErr := filepath.Abs(path); absErr == nil {

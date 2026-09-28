@@ -261,6 +261,7 @@ func (h *uploadHarness) expectAborts() error {
 			h.t.Fatalf("abort %d: sent %#v, want UploadAbortRequest", i, req)
 		}
 	}
+	h.advanceExactlyf(h.c.replyTimeout, "released upload before abort replies drained")
 	err := h.wait()
 	h.expectNothingSent()
 	return err
@@ -865,24 +866,51 @@ func TestUploadSampleShortensRetransmitTimeout(t *testing.T) {
 	}
 }
 
-func TestUploadAckCountClampedToChunksSent(t *testing.T) {
+func TestUploadRejectsAckBeyondChunksSent(t *testing.T) {
 	t.Parallel()
-	h := newUploadHarness(t, Options{}, nil)
-	data := chunkData(3)
-	size := int64(len(data))
-	h.beginChunks(t.Context(), data)
+	for _, tc := range []struct {
+		name     string
+		chunks   uint32
+		accepted uint32
+	}{
+		{"old ACK exceeds file size", 1, 9},
+		{"ACK includes unsent chunks", 3, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newUploadHarness(t, Options{}, nil)
+			data := chunkData(int(tc.chunks))
+			size := int64(len(data))
+			h.beginChunks(t.Context(), data)
 
-	h.expectChunks(0)
-	h.ackChunk(ChunkOK, 100)
-	h.expectProgress(MaxChunkData, size)
-	h.expectChunks(1)
-	h.ackChunk(ChunkOK, 2)
-	h.expectProgress(2*MaxChunkData, size)
-	h.expectChunks(2)
-	h.ackChunk(ChunkOK, 3)
-	h.expectProgress(size, size)
-	if err := h.wait(); err != nil {
-		t.Fatalf("Upload = %v, want nil", err)
+			h.expectChunks(0)
+			h.ackChunk(ChunkOK, tc.accepted)
+			entry := waitFor(t, h.logs)
+			for entry.msg != "masso: upload: ignoring impossible chunk ACK" {
+				entry = waitFor(t, h.logs)
+			}
+			h.settle()
+			h.expectNothingSent()
+			select {
+			case p := <-h.progress:
+				t.Fatalf("impossible ACK reported progress: %+v", p)
+			default:
+			}
+
+			// Chunk 0 was lost; only its retransmission can make progress.
+			h.clk.Advance(120*time.Millisecond + time.Nanosecond)
+			h.expectChunks(0)
+			for accepted := uint32(1); accepted <= tc.chunks; accepted++ {
+				h.ackChunk(ChunkOK, accepted)
+				h.expectProgress(min(int64(accepted)*MaxChunkData, size), size)
+				if accepted < tc.chunks {
+					h.expectChunks(accepted)
+				}
+			}
+			if err := h.wait(); err != nil {
+				t.Fatalf("Upload = %v, want nil", err)
+			}
+		})
 	}
 }
 
@@ -1036,7 +1064,7 @@ func TestUploadStallGivesUpThenAborts(t *testing.T) {
 	if err := h.expectAborts(); !errors.Is(err, ErrNoResponse) {
 		t.Fatalf("Upload = %v, want ErrNoResponse", err)
 	}
-	if got := h.clk.Since(t0); got != 300*time.Millisecond+2*h.c.abortInterval {
+	if got := h.clk.Since(t0); got != 300*time.Millisecond+2*h.c.abortInterval+h.c.replyTimeout {
 		t.Fatalf("finished at %v", got)
 	}
 }
@@ -1294,9 +1322,53 @@ func TestUploadNotifyAbortToleratesSendFailure(t *testing.T) {
 		}
 		waitFor(t, abortErrs)
 	}
+	h.advanceExactlyf(h.c.replyTimeout, "released upload before abort replies drained")
 	if err := h.wait(); !errors.Is(err, ErrUSBWrite) {
 		t.Fatalf("Upload = %v, want ErrUSBWrite", err)
 	}
+}
+
+func TestUploadDrainsAbortRepliesBeforeNextUpload(t *testing.T) {
+	t.Parallel()
+	h := newUploadHarness(t, Options{}, nil)
+	data := chunkData(1)
+	size := int64(len(data))
+	h.beginChunks(t.Context(), data)
+	h.expectChunks(0)
+	h.ackChunk(ChunkUSBWriteError, 0)
+	for i := range abortNotifications {
+		if i > 0 {
+			h.advanceExactlyf(h.c.abortInterval, "abort %d sent early", i)
+		}
+		if req := h.next(); req != (UploadAbortRequest{}) {
+			t.Fatalf("sent %#v, want UploadAbortRequest", req)
+		}
+	}
+	h.settle()
+	h.clk.Advance(h.c.replyTimeout - time.Nanosecond)
+
+	// Even replies delayed until the end of the drain window belong to
+	// the failed transfer. Duplicates must not shorten or extend the wait.
+	for range abortNotifications + 1 {
+		h.ackChunk(ChunkCanceled, 0x52455355) // USER
+	}
+	if err := h.c.Upload(t.Context(), "", "NEXT.NC", bytes.NewReader(data), size, nil); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Upload during abort cleanup = %v, want ErrBusy", err)
+	}
+	h.expectNothingSent()
+	h.clk.Advance(time.Nanosecond)
+	if err := h.wait(); !errors.Is(err, ErrUSBWrite) {
+		t.Fatalf("first Upload = %v, want ErrUSBWrite", err)
+	}
+
+	h.beginChunks(t.Context(), data)
+	h.expectChunks(0)
+	h.ackChunk(ChunkOK, 1)
+	h.expectProgress(size, size)
+	if err := h.wait(); err != nil {
+		t.Fatalf("next Upload = %v, want nil", err)
+	}
+	h.expectNothingSent()
 }
 
 func TestUploadAckArrivingDuringSend(t *testing.T) {

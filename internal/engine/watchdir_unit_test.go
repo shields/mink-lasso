@@ -263,3 +263,48 @@ func TestSendFileMatchesRelativeWatchDir(t *testing.T) {
 		t.Errorf("item = (root %q, path %q), want (%q, %q), the watcher's own form", it.root, it.path, "watch", want)
 	}
 }
+
+func TestSendFileCaseVariantUsesSelectedSource(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	watchDir := filepath.Join(base, "jobs")
+	selectedDir := filepath.Join(base, "JOBS")
+	watchSub := mkdirAll(t, filepath.Join(watchDir, "SUB"))
+	selectedSub := mkdirAll(t, filepath.Join(selectedDir, "SUB"))
+	watchInfo, err := os.Stat(watchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedInfo, err := os.Stat(selectedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, watchSub, "A.NC", []byte("watched"))
+	selectedPath := writeFile(t, selectedSub, "A.NC", []byte("selected"))
+	e := newUnitTestEngine(t, os.Open)
+	e.watchDir = watchDir
+	client := &uploadRecorder{}
+	e.client = client
+	if err := e.SendFile(selectedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	wantKey, wantDir, wantPath := "A.NC", "", selectedPath
+	if os.SameFile(watchInfo, selectedInfo) {
+		// On a case-insensitive filesystem the selection is in the
+		// watched tree and can safely share the watcher's path spelling.
+		wantKey, wantDir = filepath.Join("SUB", "A.NC"), "SUB"
+		wantPath = filepath.Join(watchSub, "A.NC")
+	}
+	it := e.scheduler.items[wantKey]
+	if it == nil || len(e.scheduler.items) != 1 {
+		t.Fatalf("manual selection did not queue one item keyed by %q", wantKey)
+	}
+	if it.path != wantPath || it.dir != wantDir {
+		t.Fatalf("queued source = (%q, %q), want (%q, %q)", it.path, it.dir, wantPath, wantDir)
+	}
+	e.scheduler.sendOne(t.Context(), it)
+	if dir, _, data := client.got(); dir != wantDir || string(data) != "selected" {
+		t.Errorf("upload to %q sent %q, want selected content sent to %q", dir, data, wantDir)
+	}
+}

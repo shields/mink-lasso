@@ -507,24 +507,28 @@ func skippedName(name string) bool {
 // not a folder hidden (nil taken as never hidden) reports hidden. It
 // reports ok=false for a path outside dir entirely, for dir itself (a
 // folder, not a file), and for a file under a folder the Watcher skips.
-// Path components are compared with strings.EqualFold, since Windows and
-// macOS filesystems are case-insensitive — matching SentDir's own match —
-// and both dir and path are cleaned first so an equivalent but
-// differently-formed path still resolves the same way. The engine uses it
-// to route a manual send as the watcher would.
+// Both dir and path are cleaned first. A case difference in the watched
+// folder's path is accepted only when os.SameFile confirms that the two
+// spellings identify the same directory. The engine uses it to route a
+// manual send as the watcher would, including on case-sensitive filesystems.
 func RelDir(dir, path string, hidden func(string) bool) (relDir string, ok bool) {
+	return relativeDir(dir, path, hidden, os.Stat)
+}
+
+func relativeDir(dir, path string, hidden func(string) bool, stat func(string) (fs.FileInfo, error)) (string, bool) {
 	if hidden == nil {
 		hidden = func(string) bool { return false }
 	}
 
+	dir, path = filepath.Clean(dir), filepath.Clean(path)
 	sep := string(filepath.Separator)
 	// A filesystem root such as E:\ or / keeps its separator when
 	// cleaned, which would otherwise split into a trailing empty
 	// component that no path matches — for both dir and path, or dir
 	// itself passed as path would split one component longer than dir
 	// and slip past the guard below.
-	dirParts := strings.Split(strings.TrimSuffix(filepath.Clean(dir), sep), sep)
-	pathParts := strings.Split(strings.TrimSuffix(filepath.Clean(path), sep), sep)
+	dirParts := strings.Split(strings.TrimSuffix(dir, sep), sep)
+	pathParts := strings.Split(strings.TrimSuffix(path, sep), sep)
 	if len(pathParts) <= len(dirParts) {
 		return "", false
 	}
@@ -534,7 +538,23 @@ func RelDir(dir, path string, hidden func(string) bool) (relDir string, ok bool)
 		}
 	}
 
-	current := filepath.Clean(dir)
+	parent := path
+	for range len(pathParts) - len(dirParts) {
+		parent = filepath.Dir(parent)
+	}
+	if dir != parent {
+		dirInfo, err := stat(dir)
+		if err != nil {
+			return "", false
+		}
+		parentInfo, err := stat(parent)
+		if err != nil || !os.SameFile(dirInfo, parentInfo) {
+			return "", false
+		}
+	}
+
+	relDir := ""
+	current := dir
 	for _, name := range pathParts[len(dirParts) : len(pathParts)-1] {
 		if !walkedDir(relDir, name) {
 			return "", false

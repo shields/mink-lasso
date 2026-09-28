@@ -63,9 +63,10 @@ import (
 // If the controller accepted the start and the transfer did not go on to
 // end cleanly — a chunk-ACK error result, a read error, or the stall
 // give-up above — Upload sends the upload-abort notification
-// (docs/protocol.md §5.5) three times, Options.AbortInterval apart, before
-// returning the error, so the controller removes the partial file. It never
-// sends it otherwise: the notification deletes the file of the controller's
+// (docs/protocol.md §5.5) three times, Options.AbortInterval apart, so the
+// controller removes the partial file. It then discards replies for
+// Options.ReplyTimeout before returning the error or allowing a new upload.
+// An abort is never sent otherwise: it deletes the file of the controller's
 // current transfer, even a completed one, and after a refused start or none
 // at all, that is not this upload's but whatever the controller last
 // accepted. Masso Link sends it after a refused start too; mink-lasso
@@ -286,7 +287,13 @@ func (c *Client) sendChunks(
 		if err := a.Err(); err != nil {
 			return false, err
 		}
-		newAccepted := min(int64(a.Accepted), next)
+		newAccepted := int64(a.Accepted)
+		if newAccepted > next {
+			// This cannot acknowledge this transfer: a delayed ACK from a
+			// larger file must not turn unsent or lost data into progress.
+			c.logger.Debug("masso: upload: ignoring impossible chunk ACK", "accepted", a.Accepted, "sent", next)
+			return false, nil
+		}
 		if newAccepted <= accepted {
 			c.logger.Debug("masso: upload: chunk ACK did not advance", "accepted", a.Accepted)
 			return false, nil
@@ -390,6 +397,12 @@ func (c *Client) notifyAbort(remote net.Addr) {
 			c.logger.Debug("masso: upload-abort send failed", "error", err)
 		}
 	}
+	// Each abort draws a chunk ACK carrying USER (docs/protocol.md §5.5).
+	// sendChunks has removed its waiter, so the reader discards these
+	// replies. Keep uploadMu held for a full reply window after the last
+	// send so delayed replies cannot cancel the next upload. Waiting for
+	// a fixed window also bounds cleanup when replies are lost or duplicated.
+	<-c.clock.After(c.replyTimeout)
 }
 
 func retransmitTimeout(srtt time.Duration) time.Duration {

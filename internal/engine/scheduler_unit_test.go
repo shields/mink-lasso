@@ -199,6 +199,56 @@ func TestSendFileDuringSendChangedContentQueuesResend(t *testing.T) {
 	}
 }
 
+func TestSendFileDuringSendDifferentPathWithMatchingMetadata(t *testing.T) {
+	t.Parallel()
+	oldPath := writeFile(t, t.TempDir(), "A.NC", []byte("old"))
+	newPath := writeFile(t, t.TempDir(), "A.NC", []byte("new"))
+	when := time.Unix(1234567890, 0)
+	for _, path := range []string{oldPath, newPath} {
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := newUnitTestEngine(t, os.Open)
+	if err := e.SendFile(oldPath); err != nil {
+		t.Fatal(err)
+	}
+	client := &uploadRecorder{during: func() {
+		if err := e.SendFile(newPath); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	e.client = client
+	it := e.scheduler.items["A.NC"]
+	it.sending = true
+	e.scheduler.sendOne(t.Context(), it)
+	if _, _, data := client.got(); string(data) != "old" {
+		t.Fatalf("first upload = %q, want old", data)
+	}
+	if it.state != Pending || it.path != newPath || !it.manual {
+		t.Fatalf("after first upload: state=%v path=%q manual=%v, want Pending for the new manual path",
+			it.state, it.path, it.manual)
+	}
+	if got := e.scheduler.items["A.NC"]; got != it || len(e.scheduler.items) != 1 {
+		t.Fatal("manual selection replaced or duplicated the in-flight item")
+	}
+
+	client.during = nil
+	it.sending = true
+	e.scheduler.sendOne(t.Context(), it)
+	if _, _, data := client.got(); string(data) != "new" {
+		t.Fatalf("second upload = %q, want new", data)
+	}
+	if it.state != Sent {
+		t.Errorf("state after second upload = %v, want Sent", it.state)
+	}
+	for _, path := range []string{oldPath, newPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("manual source %q was removed: %v", path, err)
+		}
+	}
+}
+
 func TestOpenForSendBadName(t *testing.T) {
 	t.Parallel()
 	e := newUnitTestEngine(t, nil)

@@ -256,7 +256,7 @@ func (s *scheduler) retry(name string) {
 // replacing the map entry would orphan the in-flight item, whose
 // completion would still archive the file out from under this manual
 // request with no visible error. It is marked for a resend once that
-// transfer finishes — mirroring ready() — only when size or modTime
+// transfer finishes — mirroring ready() — only when path, size, or modTime
 // actually differ from what's already recorded: setting it.manual is
 // enough on its own to make archiveSent skip the archive, so a request to
 // send exactly the bytes already in flight does not also pay for a second,
@@ -264,7 +264,7 @@ func (s *scheduler) retry(name string) {
 func (s *scheduler) sendFile(root, dir, base, path string, size int64, modTime time.Time) {
 	s.mu.Lock()
 	it := s.itemLocked(root, dir, base)
-	changed := it.size != size || !it.modTime.Equal(modTime)
+	changed := it.path != path || it.size != size || !it.modTime.Equal(modTime)
 	it.path = path
 	it.size = size
 	it.modTime = modTime

@@ -482,10 +482,8 @@ func TestRelDir(t *testing.T) {
 			wantRelDir: "JOBS", wantOK: true,
 		},
 		{
-			name:       "the watch dir given with a different case",
-			dir:        strings.ToUpper(dir),
-			path:       filepath.Join(dir, "JOBS", "PART.NC"),
-			wantRelDir: "JOBS", wantOK: true,
+			name: "unverified casing difference", dir: strings.ToUpper(dir),
+			path: filepath.Join(dir, "JOBS", "PART.NC"), wantOK: false,
 		},
 		{
 			name:       "an equivalent but unclean form of both dir and path",
@@ -501,6 +499,57 @@ func TestRelDir(t *testing.T) {
 			if relDir != tt.wantRelDir || ok != tt.wantOK {
 				t.Errorf("RelDir(%q, %q) = (%q, %v), want (%q, %v)",
 					tt.dir, tt.path, relDir, ok, tt.wantRelDir, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestRelDirChecksFilesystemIdentityForCaseVariants(t *testing.T) {
+	t.Parallel()
+	first, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join("base", "jobs")
+	other := filepath.Join("base", "JOBS")
+	path := filepath.Join(other, "SUB", "PART.NC")
+	for _, tc := range []struct {
+		name      string
+		dirInfo   fs.FileInfo
+		dirErr    error
+		otherInfo fs.FileInfo
+		otherErr  error
+		wantOK    bool
+	}{
+		{"same directory", first, nil, first, nil, true},
+		{"distinct directories", first, nil, second, nil, false},
+		{"watch folder stat fails", nil, os.ErrPermission, first, nil, false},
+		{"selected folder stat fails", first, nil, nil, os.ErrNotExist, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stat := func(p string) (fs.FileInfo, error) {
+				switch p {
+				case dir:
+					return tc.dirInfo, tc.dirErr
+				case other:
+					return tc.otherInfo, tc.otherErr
+				default:
+					t.Fatalf("stat called with unexpected directory %q", p)
+					return nil, os.ErrNotExist
+				}
+			}
+			rel, ok := relativeDir(dir, path, nil, stat)
+			wantRel := ""
+			if tc.wantOK {
+				wantRel = "SUB"
+			}
+			if rel != wantRel || ok != tc.wantOK {
+				t.Errorf("relativeDir = (%q, %v), want (%q, %v)", rel, ok, wantRel, tc.wantOK)
 			}
 		})
 	}

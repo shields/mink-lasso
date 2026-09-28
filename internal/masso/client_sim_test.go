@@ -560,7 +560,10 @@ func TestUploadSilentAfterChunkErrNoResponse(t *testing.T) {
 	s.SetSilentAfterChunk(0)
 	const stallTimeout = 50 * time.Millisecond
 	const abortInterval = 20 * time.Millisecond
-	c, fc := newFakeClockClient(t, s, masso.Options{StallTimeout: stallTimeout, AbortInterval: abortInterval})
+	const replyTimeout = time.Second
+	c, fc := newFakeClockClient(t, s, masso.Options{
+		StallTimeout: stallTimeout, AbortInterval: abortInterval, ReplyTimeout: replyTimeout,
+	})
 
 	data := testData(masso.MaxChunkData + 10)
 	progressCh, errCh := uploadInBackground(t.Context(), c, "", "SILENT.NC", data)
@@ -575,6 +578,8 @@ func TestUploadSilentAfterChunkErrNoResponse(t *testing.T) {
 		fc.BlockUntil(1)
 		fc.Advance(abortInterval)
 	}
+	fc.BlockUntil(1)
+	fc.Advance(replyTimeout)
 
 	if err := waitFor(t, errCh); !errors.Is(err, masso.ErrNoResponse) {
 		t.Fatalf("Upload = %v, want ErrNoResponse", err)

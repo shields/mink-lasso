@@ -584,6 +584,12 @@ a 2-chunk window with the adaptive retransmit timeout, the 15 s overall give-up,
 source-IP filtering of status/tool/ACK replies (§1), and the `0x0C` notification
 (§5.5) after a failed but acknowledged transfer.
 
+To guard against delayed replies from an earlier transfer, mink-lasso ignores a
+successful chunk ACK whose accepted count exceeds the number of chunks sent,
+instead of clamping it into progress. After the last `0x0C` notification, it
+discards chunk replies for a bounded reply window before allowing another upload
+on the same socket (§5.5).
+
 ### 5.4 Controller result → message mapping (from the app)
 
 | Condition                                                                          | Message shown by Masso Link                  |

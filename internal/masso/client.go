@@ -146,7 +146,9 @@ type Options struct {
 
 	// ReplyTimeout bounds each attempt of a request that is retried a
 	// fixed number of times (discovery and config during Connect, each
-	// tool query). Zero means one second.
+	// tool query). It also bounds the wait for stray chunk ACKs after the
+	// last upload-abort notification, before another upload may start.
+	// Zero means one second.
 	ReplyTimeout time.Duration
 
 	// StartRetransmit is how often Upload resends an unacknowledged

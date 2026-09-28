@@ -188,21 +188,22 @@ func (h *probeHarness) recvWithin(t *testing.T, wait time.Duration) ([]byte, boo
 
 // tryRoundTrip sends pkt up to probeAttempts times, waiting up to
 // probeReplyWait each time for the next reply, and returns the first
-// reply's raw bytes, or nil, false if none arrives; roundTrip builds the
-// harness's Fatal-on-no-reply behavior on top of this.
-func (h *probeHarness) tryRoundTrip(t *testing.T, pkt []byte) ([]byte, bool) {
+// reply's raw bytes and the number of retries sent, or ok == false if none
+// arrives; roundTrip builds the harness's Fatal-on-no-reply behavior on top
+// of this.
+func (h *probeHarness) tryRoundTrip(t *testing.T, pkt []byte) (raw []byte, retries int, ok bool) {
 	t.Helper()
 
 	h.drain(t)
 
-	for range probeAttempts {
+	for retries := range probeAttempts {
 		h.send(t, pkt)
 		if raw, ok := h.recv(t); ok {
-			return raw, true
+			return raw, retries, true
 		}
 	}
 
-	return nil, false
+	return nil, probeAttempts - 1, false
 }
 
 // roundTrip behaves like tryRoundTrip but fails the test if no reply
@@ -214,7 +215,7 @@ func (h *probeHarness) tryRoundTrip(t *testing.T, pkt []byte) ([]byte, bool) {
 func (h *probeHarness) roundTrip(t *testing.T, pkt []byte) []byte {
 	t.Helper()
 
-	if raw, ok := h.tryRoundTrip(t, pkt); ok {
+	if raw, _, ok := h.tryRoundTrip(t, pkt); ok {
 		return raw
 	}
 
@@ -324,8 +325,8 @@ type probeTransfer struct {
 	// successful chunk ACK.
 	accepted uint32
 	// open is true while the controller has this transfer open: from a
-	// StartOK reply until every chunk is accepted or a chunk ACK reports an
-	// error.
+	// StartOK or post-retry StartAlreadyStarted reply until every chunk is
+	// accepted or a chunk ACK reports an error.
 	open bool
 }
 
@@ -349,13 +350,15 @@ func (h *probeHarness) registerTransfer(t *testing.T, data []byte) *probeTransfe
 // probeTransfer covering it, already registered per registerTransfer, along
 // with the raw reply. It fails the test if no reply arrives at all, since
 // every caller needs the reply's content to continue. The transfer counts
-// as open only if the reply is a start ACK carrying StartOK.
+// as open only if the reply is a start ACK carrying StartOK, or
+// StartAlreadyStarted after a retry (docs/protocol.md §5.1).
 func (h *probeHarness) startTransfer(t *testing.T, pkt, data []byte) (*probeTransfer, []byte) {
 	t.Helper()
 
-	tr := h.registerTransfer(t, data)
-	raw := h.roundTrip(t, pkt)
-	tr.open = startAccepted(raw)
+	tr, raw, ok := h.startTransferOptional(t, pkt, data)
+	if !ok {
+		t.Fatalf("probe harness: no reply from %s after %d attempt(s)", h.remote, probeAttempts)
+	}
 
 	return tr, raw
 }
@@ -368,14 +371,15 @@ func (h *probeHarness) startTransferOptional(t *testing.T, pkt, data []byte) (tr
 	t.Helper()
 
 	tr = h.registerTransfer(t, data)
-	raw, ok = h.tryRoundTrip(t, pkt)
-	tr.open = ok && startAccepted(raw)
+	raw, retries, ok := h.tryRoundTrip(t, pkt)
+	tr.open = ok && startAccepted(raw, retries)
 
 	return tr, raw, ok
 }
 
-// startAccepted reports whether raw is a start ACK carrying StartOK.
-func startAccepted(raw []byte) bool {
+// startAccepted recognizes StartOK, and StartAlreadyStarted only after a
+// retry; a first-attempt StartAlreadyStarted is a refusal (§5.1).
+func startAccepted(raw []byte, retries int) bool {
 	reply, err := masso.DecodeReply(raw)
 	if err != nil {
 		return false
@@ -383,7 +387,7 @@ func startAccepted(raw []byte) bool {
 
 	ack, ok := reply.(masso.StartAck)
 
-	return ok && ack.Result == masso.StartOK
+	return ok && (ack.Result == masso.StartOK || (ack.Result == masso.StartAlreadyStarted && retries > 0))
 }
 
 // chunk sends chunk index of tr's data and returns the controller's chunk
@@ -502,7 +506,7 @@ func describeReply(r masso.Reply) string {
 func (h *probeHarness) observeChunk(t *testing.T, tag, label string, data []byte, index uint32) (masso.ChunkAck, bool) {
 	t.Helper()
 
-	raw, ok := h.tryRoundTrip(t, chunkPkt(t, data, index))
+	raw, _, ok := h.tryRoundTrip(t, chunkPkt(t, data, index))
 	if !ok {
 		t.Logf("%s: %s: no reply after %d attempt(s)", tag, label, probeAttempts)
 
