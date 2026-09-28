@@ -18,8 +18,8 @@ These need a real controller; `protocol.md` records each as unverified.
    transfer is open is accepted (§5.1), so removing the USB drive (`0xE9`) is
    the only known way to draw an error.
 4. **After `0x0C`.** The controller refuses chunks sent after `0x0C` but does
-   not always release the transfer (§5.5). What decides whether its "Receiving"
-   screen clears, and what happens to the partial file?
+   not always release the transfer, and sometimes keeps a 0-byte file and
+   sometimes none (§5.5). What decides each?
 
 ## Open transfers
 

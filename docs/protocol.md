@@ -423,8 +423,13 @@ also carries some folder-specific branch beyond that was not checked in this
 pass. (probe) The controller accepted, created, and stored a file in each of six
 directories under `MLTEST\` whose names had an embedded space, an embedded
 period, a trailing period, a trailing space, the punctuation
-`!@#$%^&()_+-=[]{}',;~`, and a single 209-byte component. Whether it stores a
-trailing space or period verbatim was not checked. What Masso Link itself does
+`!@#$%^&()_+-=[]{}',;~`, and a single 209-byte component. Read back on a PC, the
+trailing-period and trailing-space directories are two distinct entries that
+Windows lists under the same name, `MLTESTQ6`, since it strips a trailing period
+or space from the names it reports; the controller evidently kept both
+characters. (Deleting such a directory on Windows needs the `\\?\` path prefix.)
+Files it stored read back byte for byte as sent, including one whose second
+chunk had first been sent ahead of its turn (§5.2). What Masso Link itself does
 or does not validate before sending a directory name is set out above.
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
@@ -639,8 +644,19 @@ chunking the first, then sent `0x0C`, every later first start request for the
 first file drew `0xF7` (§5.1), across several runs, with nothing on the screen;
 that file existed on the drive. After a hand cancel, a start for the canceled
 file drew `0x00` again. The status packet (§4) showed none of this (idle, empty
-file name). Still untested: whether any packet reliably releases a transfer from
-the client side, and what the controller does with the partial file.
+file name).
+
+What the drive held afterward, read back on a PC:
+
+| Transfer                                                                       | On the drive                                                     |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| started, no chunks, then `0x0C`                                                | a 0-byte file                                                    |
+| started, then displaced by a start for another file before any chunk           | a 0-byte file the controller refused to delete; see `0xF7` above |
+| started while another was open (the displacing one), no chunks, then `0x0C`    | no file                                                          |
+| started, two of four chunks accepted, then `0x0C` and one more (refused) chunk | no file                                                          |
+
+Still untested: whether any packet reliably releases a transfer from the client
+side, and what, among these cases, decides whether a partial file is kept.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 
