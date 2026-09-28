@@ -64,12 +64,14 @@ half-written file off the controller. The folder is rescanned every two seconds
 in any case, so files still get picked up on network shares and after a burst of
 changes that Windows fails to report.
 
-File names may be up to **33 ASCII characters** long (including the extension,
-which must be one of `.nc`, `.txt`, `.cnc`, `.tap`, `.eia`, `.htg`, `.wiz`,
-`.gcode`, or `.ngc`): the longest name the controller reports in full, and one a
-real controller has accepted and stored. Configure your post-processor
-accordingly; a file with a longer or otherwise invalid name is reported as
-rejected and left where it is until it is renamed.
+File names may be up to **33 characters** long, including the extension, which
+must be one of `.nc`, `.txt`, `.cnc`, `.tap`, `.eia`, `.htg`, `.wiz`, `.gcode`,
+or `.ngc`: that is the longest name the controller reports in full, and a real
+controller has accepted and stored names that long. They must be printable ASCII
+without `\ / : * ? " < > |`, which Windows and the USB drive's FAT file system
+forbid anyway. Configure your post-processor accordingly; a file with a longer
+or otherwise invalid name is reported as rejected and left where it is until it
+is renamed.
 
 Files that were sent before with the same name are overwritten on the
 controller, just as Masso Link does. In the `sent` folder nothing is ever
@@ -267,17 +269,18 @@ be open; the status packet does not show it, so check the screen and cancel any
 such transfer before rerunning. Between probes, the run stops unless the
 controller answers a status request with a status reply.
 
-| Probe | What it does                                                                                                                                                                                                       | Leaves behind                                                                                                                      |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Q7/Q8 | Captures the raw identity and config replies, for the operator to read off which bits carry what                                                                                                                   | nothing                                                                                                                            |
-| Q2    | Resends an upload-start request and records the reply, then finishes one file continuing from chunk 0 and a second sending chunk 1 before chunk 0                                                                  | `MLTESTQ2A.NC`, `MLTESTQ2B.NC`                                                                                                     |
-| Q3    | Sends a start while another transfer is open, then finishes both; with the USB drive removed, the first start is refused instead, and the probe sends that file's chunks and records their ACKs                    | `MLTESTQ3A<nnn>.NC` (stuck until the controller restarts), `MLTESTQ3B<nnn>.NC`                                                     |
-| Q4    | Sends two chunks, the post-transfer signal, then the remaining chunks, which the controller refuses                                                                                                                | nothing, but "Receiving MLTESTQ4.NC" stays on the screen (at 66%) until the next probe starts a transfer or it is canceled by hand |
-| Q14   | Opens a transfer and sends one chunk, sends the same start again, then the post-transfer signal, then the start once more, and finishes whatever that opens                                                        | `MLTESTQ14<nnn>.NC`, complete if the signal freed its name, otherwise stuck until the controller restarts                          |
-| Q5    | Uploads into a new, uniquely-named folder under `MLTEST\` that cannot already exist                                                                                                                                | an `MLTEST\MLTESTQ5-<timestamp>` folder, possibly containing `MLTESTQ5.NC`                                                         |
-| Q6    | Uploads into six folders under `MLTEST\` whose names probe edge cases (embedded/trailing spaces and periods, punctuation, a ~209-byte component)                                                                   | six `MLTEST\MLTESTQ6*` folders, each possibly containing `MLTESTQ6.NC`                                                             |
-| Q12   | Opt-in (`MINK_LASSO_PROBE_LONG_NAMES=1`): hand-builds and sends upload-start requests for a 34-character name, one over mink-lasso's limit, and a 33-character one, finishing each transfer the controller accepts | `MLTESTQ12-XXXXXXXXXXXXXXXXXXXXX.NC`, `MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC` — only with `MINK_LASSO_PROBE_LONG_NAMES=1`              |
-| Q9    | Polls status for up to 3 minutes for a 33-character file name — Q12's own upload if it completed, otherwise one pre-staged by hand (see "Preparing Q9" below); Q9 itself uploads nothing                           | nothing beyond what Q12 already left, or the pre-staged file left as placed                                                        |
+| Probe | What it does                                                                                                                                                                                                       | Leaves behind                                                                                                                                                                                              |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q7/Q8 | Captures the raw identity and config replies, for the operator to read off which bits carry what                                                                                                                   | nothing                                                                                                                                                                                                    |
+| Q2    | Resends an upload-start request and records the reply, then finishes one file continuing from chunk 0 and a second sending chunk 1 before chunk 0                                                                  | `MLTESTQ2A.NC`, `MLTESTQ2B.NC`                                                                                                                                                                             |
+| Q3    | Sends a start while another transfer is open, then finishes both; with the USB drive removed, the first start is refused instead, and the probe sends that file's chunks and records their ACKs                    | `MLTESTQ3A<nnn>.NC` (stuck until the controller restarts), `MLTESTQ3B<nnn>.NC`                                                                                                                             |
+| Q4    | Starts `MLTESTQ4N.NC` and sends the post-transfer signal before any chunk; then sends two chunks of `MLTESTQ4.NC`, the signal, then the remaining chunks, which the controller refuses                             | whatever the signal leaves of `MLTESTQ4N.NC` and `MLTESTQ4.NC` (ordinarily nothing); "Receiving MLTESTQ4.NC" stays on the screen (at 66%) until the next probe starts a transfer or it is canceled by hand |
+| Q14   | Opens a transfer and sends one chunk, sends the same start again, then the post-transfer signal, then the start once more, and finishes whatever that opens                                                        | `MLTESTQ14<nnn>.NC`, complete if the signal freed its name, otherwise stuck until the controller restarts                                                                                                  |
+| Q13   | Uploads `MLTESTQ13.NC`, so nothing is open, then sends the post-transfer signal; watch the controller's screen for anything it shows                                                                               | `MLTESTQ13.NC`                                                                                                                                                                                             |
+| Q5    | Uploads into a new, uniquely-named folder under `MLTEST\` that cannot already exist                                                                                                                                | an `MLTEST\MLTESTQ5-<timestamp>` folder, possibly containing `MLTESTQ5.NC`                                                                                                                                 |
+| Q6    | Uploads into six folders under `MLTEST\` whose names probe edge cases (embedded/trailing spaces and periods, punctuation, a ~209-byte component)                                                                   | six `MLTEST\MLTESTQ6*` folders, each possibly containing `MLTESTQ6.NC`                                                                                                                                     |
+| Q12   | Opt-in (`MINK_LASSO_PROBE_LONG_NAMES=1`): hand-builds and sends upload-start requests for a 34-character name, one over mink-lasso's limit, and a 33-character one, finishing each transfer the controller accepts | `MLTESTQ12-XXXXXXXXXXXXXXXXXXXXX.NC`, `MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC` — only with `MINK_LASSO_PROBE_LONG_NAMES=1`                                                                                      |
+| Q9    | Polls status for up to 3 minutes for a 33-character file name — Q12's own upload if it completed, otherwise one pre-staged by hand (see "Preparing Q9" below); Q9 itself uploads nothing                           | nothing beyond what Q12 already left, or the pre-staged file left as placed                                                                                                                                |
 
 After it runs, check the controller's own file browser by hand. Every probe
 sends only well-formed packets, but what the controller actually does with them
@@ -303,6 +306,8 @@ guaranteed:
   chunks 0 and 1 to see whether the controller stores them anyway
   (docs/protocol-questions.md Q3), so the file may be complete, partial, or
   absent.
+- `MLTESTQ4N.NC` — started and then signaled before any chunk: absent, or
+  present with 0 bytes, which is what docs/protocol-questions.md Q4 asks.
 - `MLTESTQ4.NC` — ordinarily absent: the controller refuses chunks sent after
   the post-transfer signal and removes the partial file. Its screen keeps
   showing "Receiving MLTESTQ4.NC" at 66% until another transfer starts (Q5, in a

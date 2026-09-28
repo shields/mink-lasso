@@ -67,6 +67,9 @@ func TestProbe(t *testing.T) {
 	t.Run("Q14_SignalFreesOpenTransfer", func(t *testing.T) { probeQ14(t, h) })
 	h.requireStatusReply(t, "Q14_SignalFreesOpenTransfer")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
+	t.Run("Q13_SignalWhenIdle", func(t *testing.T) { probeQ13(t, h) })
+	h.requireStatusReply(t, "Q13_SignalWhenIdle")
+	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q5_MissingDirectory", func(t *testing.T) { probeQ5(t, h) })
 	h.requireStatusReply(t, "Q5_MissingDirectory")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
@@ -296,12 +299,15 @@ func probeQ3Refused(t *testing.T, tr *probeTransfer, name string) {
 	t.Logf("PROBE Q3: check the drive for %s once it is back in the controller", name)
 }
 
-// probeQ4 addresses docs/protocol-questions.md Q4: whether the controller
-// stores chunks sent after the post-transfer signal, and what accepted count
-// it reports for them. It sends two chunks, the signal, then finishes the
-// transfer, logging each ACK.
+// probeQ4 addresses docs/protocol-questions.md Q4: whether the
+// post-transfer signal ever leaves a partial or 0-byte file behind. It first
+// starts MLTESTQ4N.NC and sends the signal before any chunk, then starts
+// MLTESTQ4.NC, sends two chunks, the signal, and tries to finish it,
+// logging each ACK. What each leaves on the drive answers the question.
 func probeQ4(t *testing.T, h *probeHarness) {
 	t.Helper()
+
+	probeQ4NoChunks(t, h)
 
 	data := nChunkFileData("q4", 4)
 
@@ -394,6 +400,66 @@ func probeQ14(t *testing.T, h *probeHarness) {
 	if tr3.finish(t, "PROBE Q14 "+name) {
 		t.Logf("PROBE Q14: the signal freed %s; check that the drive holds it complete (%d bytes)", name, len(data))
 	}
+}
+
+// probeQ4NoChunks starts MLTESTQ4N.NC and sends the post-transfer signal
+// before any chunk.
+func probeQ4NoChunks(t *testing.T, h *probeHarness) {
+	t.Helper()
+
+	const name = "MLTESTQ4N.NC"
+
+	data := nChunkFileData("q4n", 1)
+
+	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
+	if err != nil {
+		t.Fatalf("PROBE Q4: building start request for %s: %v", name, err)
+	}
+
+	tr, raw := h.startTransfer(t, startPkt, data)
+	logPacket(t, "PROBE Q4", "start ACK ("+name+")", raw)
+
+	if !tr.open {
+		t.Logf("PROBE Q4: start for %s not accepted; skipping the no-chunk case", name)
+
+		return
+	}
+
+	t.Logf("PROBE Q4: sending the post-transfer signal before any chunk of %s", name)
+	tr.abort(t)
+	tr.open = false // the signal ends a transfer's data (docs/protocol.md §5.5)
+	t.Logf("PROBE Q4: check the drive for %s: absent, or present with 0 bytes", name)
+}
+
+// probeQ13 serves docs/protocol-questions.md Q13 indirectly: rather than
+// free a displaced transfer, a client can keep one from arising by sending
+// the post-transfer signal when it connects, canceling any transfer an
+// earlier run left open before it starts another file. That is safe only if
+// the signal is harmless with nothing open, which this checks: it completes
+// a one-chunk upload, so nothing is open, then sends the signal and logs
+// the replies. The operator watches the controller's screen for anything
+// the signal puts there.
+func probeQ13(t *testing.T, h *probeHarness) {
+	t.Helper()
+
+	const name = "MLTESTQ13.NC"
+
+	data := nChunkFileData("q13", 1)
+
+	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
+	if err != nil {
+		t.Fatalf("PROBE Q13: building start request: %v", err)
+	}
+
+	tr, raw := h.startTransfer(t, startPkt, data)
+	logPacket(t, "PROBE Q13", "start ACK ("+name+")", raw)
+
+	if !tr.finish(t, "PROBE Q13 "+name) {
+		t.Skip("PROBE Q13: the upload did not complete, so something may still be open; not sending the signal")
+	}
+
+	t.Log("PROBE Q13: nothing is open; sending the post-transfer signal now: watch the controller's screen")
+	h.sendAbortSignal(t)
 }
 
 // probeQ5 addresses docs/protocol-questions.md Q5: whether the controller

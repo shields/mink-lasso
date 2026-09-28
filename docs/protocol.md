@@ -676,6 +676,15 @@ controller's replies (above), so the order of events around it is less certain
 than in the others. Still untested: whether `0x0C` ever leaves a partial file
 behind, and whether anything short of a restart frees a displaced transfer.
 
+(probe) Once, and not reproduced since, a start request drew no reply for 2 s;
+its resend, and the status request after it, drew identity replies (§3.1)
+instead, and the controller's screen showed "File transfer error, timeout",
+naming no file, until it later cleared. No file for that start was on the drive
+afterward. The controller's screen had been showing a transfer stopped by `0x0C`
+for about four minutes. What triggered it, and which transfer timed out, is
+unknown. A client that resends an unanswered start and ignores replies of a type
+it is not waiting for rides it out.
+
 ### 5.6 Multiple files and folder drops (v2.15)
 
 Dropping several files, or a folder, queues them and sends them one at a time,

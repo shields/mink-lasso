@@ -12,9 +12,6 @@ probes") records what a real controller does for the ones only it can settle.
 
 These need a real controller; `protocol.md` records each as unverified.
 
-3. **Refused starts.** With no USB drive, a start draws `0xE9` and a chunk sent
-   afterward stores nothing (§5.1). Is there any refusal with a drive present,
-   and does the controller begin an upload after one?
 4. **After `0x0C`.** `0x0C` ends a transfer's data and frees its name, though
    the controller's screen keeps showing it (§5.5). Does it ever leave a partial
    or 0-byte file behind?
@@ -24,33 +21,3 @@ These need a real controller; `protocol.md` records each as unverified.
 13. **Freeing a displaced transfer.** A transfer displaced by a start for
     another file without `0x0C` first stays open, and its name draws `0xF7`,
     until the controller restarts (§5.5). Is there any packet that frees it?
-
-## Unexplained observations
-
-15. **Identity replies and a transfer timeout.** Once, with no transfer of ours
-    open and the controller's screen still showing an earlier transfer stopped
-    by `0x0C` (§5.5), a start request drew no reply for 2 s; the resend, and the
-    status request after it, drew identity replies (§3.1) instead, and the
-    controller's screen showed "File transfer error, timeout" naming no file,
-    which later cleared; no file for that start was on the drive afterward. What
-    triggers this, and which transfer timed out?
-
-## Replies
-
-7. **Config reply.** The config reply (§3.2) echoes the serial's low 16 bits in
-   bytes 5–6. Does Masso Link compare them with anything?
-8. **Identity bytes 9–12.** What does the second 32-bit field of the identity
-   reply mean, and is byte 12 always `0x40`?
-
-## Folder uploads
-
-10. **Base path.** What form does the base-path setting of §5.1 take in the path
-    field — with or without a leading or trailing backslash — and how is it
-    joined with a folder drop's relative path? §5.1 records that the setting's
-    text becomes the path field, but not its exact form or the join.
-
-## File names
-
-12. **File-name length.** The controller accepts names of at least 33 characters
-    (§5). What is the longest it accepts, and how does the status packet (§4),
-    whose field holds 33, show a longer one?

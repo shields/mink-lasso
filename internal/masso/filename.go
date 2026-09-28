@@ -25,9 +25,9 @@ import (
 var Extensions = []string{".nc", ".txt", ".cnc", ".tap", ".eia", ".htg", ".wiz", ".gcode", ".ngc"}
 
 // ValidateFileName reports whether name is a valid Masso upload file name:
-// 1 to MaxFileName printable-ASCII bytes (0x20-0x7E), excluding '\', '/', and ':', and
-// excluding the reserved names "." and "..". It wraps ErrBadFileName with
-// the specific reason.
+// 1 to MaxFileName printable-ASCII bytes (0x20-0x7E), excluding the
+// characters in forbiddenChars and the reserved names "." and "..". It wraps
+// ErrBadFileName with the specific reason.
 func ValidateFileName(name string) error {
 	if len(name) < 1 || len(name) > MaxFileName {
 		return fmt.Errorf("%w: %q is %d bytes, want 1-%d", ErrBadFileName, name, len(name), MaxFileName)
@@ -58,6 +58,12 @@ func ValidateUploadDir(dir string) error {
 	return nil
 }
 
+// forbiddenChars are the printable ASCII characters no file or directory
+// name may contain: the path separators '\' and '/', and the characters a
+// FAT file system, such as the controller's USB drive, cannot hold in a
+// name. Windows forbids the same ones, so a file on Windows never has them.
+const forbiddenChars = `\/:*?"<>|`
+
 // validateComponent applies the character rules shared by file names and
 // upload directory components, wrapping sentinel with the reason.
 func validateComponent(s string, sentinel error) error {
@@ -69,7 +75,7 @@ func validateComponent(s string, sentinel error) error {
 		if b < 0x20 || b > 0x7E {
 			return fmt.Errorf("%w: %q has a non-printable byte at %d", sentinel, s, i)
 		}
-		if b == '\\' || b == '/' || b == ':' {
+		if strings.IndexByte(forbiddenChars, b) >= 0 {
 			return fmt.Errorf("%w: %q contains %q", sentinel, s, string(b))
 		}
 	}
