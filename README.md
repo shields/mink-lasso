@@ -144,7 +144,9 @@ only; they are never written to the config file by themselves—but clicking
 Apply, Browse…, or the "Upload while machining" checkbox in the GUI saves the
 values currently in effect, including any active override. `-version` prints the
 version, which follows [gitcalver](https://gitcalver.org/): `20260825.2` is the
-second build from August 25, 2026 (UTC).
+second build from August 25, 2026 (UTC). The exe's Properties dialog shows the
+same product version, and file version `2026.8.25.2`, because Windows holds that
+one as four 16-bit numbers.
 
 `mink-lasso.exe` never has a console window, even with `-headless`: nothing
 reads its standard output unless the launcher redirected it, and `Ctrl+C` has
@@ -199,10 +201,11 @@ second is a failed discovery.
 
 Things the automated tests cannot cover, to check by hand on a Windows PC after
 UI changes: the window at 100% and 150% display scaling; the notification-area
-icon, its balloons, and its menu; Browse… for the folder; closing to the
-notification area and restoring; File → Send file…; a second launch being
-refused; and the messages shown for no USB drive, cancel on the controller, and
-a feed hold during a job.
+icon, its balloons, and its menu; Browse… for the folder; Show in folder for a
+sent file (Explorer opens `sent` with the file selected, even when the watch
+folder's path has spaces); closing to the notification area and restoring; File
+→ Send file…; a second launch being refused; and the messages shown for no USB
+drive, cancel on the controller, and a feed hold during a job.
 
 ## License
 

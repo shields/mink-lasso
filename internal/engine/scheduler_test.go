@@ -143,7 +143,20 @@ func TestSchedulerSendsAndArchives(t *testing.T) {
 	want := []byte("G0 X0 Y0\n")
 	writeFile(t, dir, "PART.NC", want)
 
-	waitForEvent(t, events, isTransferEvent("PART.NC", Sent))
+	ev := waitForEvent(t, events, isTransferEvent("PART.NC", Sent))
+
+	// The Sent event points at the archived copy, so "Show in folder"
+	// finds it; the item itself keeps the watch-folder path, which is
+	// where a later file of the same name will be read from.
+	if got, want := asTransferEvent(t, ev).Path, filepath.Join(dir, "sent", "PART.NC"); got != want {
+		t.Errorf("Sent event Path = %q, want %q", got, want)
+	}
+	e.scheduler.mu.Lock()
+	itemPath := e.scheduler.items["PART.NC"].path
+	e.scheduler.mu.Unlock()
+	if want := filepath.Join(dir, "PART.NC"); itemPath != want {
+		t.Errorf("item path = %q, want %q", itemPath, want)
+	}
 
 	got, ok := s.File("PART.NC")
 	if !ok {
@@ -520,6 +533,10 @@ func TestSchedulerArchiveFailureThenSentUnfiled(t *testing.T) {
 	if msg := asTransferEvent(t, ev).Message; msg == "" {
 		t.Error("SentUnfiled event has empty Message")
 	}
+	// The file never left the watch folder, so that is where it points.
+	if got, want := asTransferEvent(t, ev).Path, filepath.Join(dir, "F.NC"); got != want {
+		t.Errorf("SentUnfiled event Path = %q, want %q", got, want)
+	}
 
 	// It must not be re-uploaded on its own.
 	select {
@@ -532,7 +549,10 @@ func TestSchedulerArchiveFailureThenSentUnfiled(t *testing.T) {
 
 	failRename = false
 	e.Retry("F.NC")
-	waitForEvent(t, events, isTransferEvent("F.NC", Sent))
+	sent := waitForEvent(t, events, isTransferEvent("F.NC", Sent))
+	if got, want := asTransferEvent(t, sent).Path, filepath.Join(dir, "sent", "F.NC"); got != want {
+		t.Errorf("Sent event Path after Retry = %q, want %q", got, want)
+	}
 }
 
 // TestSchedulerChangedDuringSendingSendsTwice confirms a file changed while

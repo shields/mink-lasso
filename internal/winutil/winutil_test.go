@@ -15,6 +15,8 @@
 package winutil
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -51,5 +53,23 @@ func TestStartCommandRunsAProcess(t *testing.T) {
 
 	if err := startCommand(name, args...); err != nil {
 		t.Fatalf("startCommand(%s, %v): %v", name, args, err)
+	}
+}
+
+func TestAbsPath(t *testing.T) {
+	t.Parallel()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	if got, want := absPath("parts"), filepath.Join(wd, "parts"); got != want {
+		t.Errorf("absPath(parts) = %q, want %q", got, want)
+	}
+
+	abs := filepath.Join(wd, "sent", "F.NC")
+	if got := absPath(abs); got != abs {
+		t.Errorf("absPath(%q) = %q, want it unchanged", abs, got)
 	}
 }

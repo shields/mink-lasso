@@ -30,6 +30,11 @@ VERSION ?= $(shell d=$$(TZ=UTC git log -1 --date=format-local:%Y%m%d --format=%c
 
 LDFLAGS := -H windowsgui -s -w -X msrl.dev/mink-lasso/internal/app.version=$(VERSION)
 
+# A Windows version resource also holds the version as four 16-bit numbers, so
+# 20260922.2 becomes 2026.9.22.2 (go-winres reads the 09 that sed leaves as 9).
+# Its version strings keep the gitcalver form.
+FIXED_VERSION := $(or $(shell echo $(VERSION) | sed -nE 's/^([0-9]{4})([0-9]{2})([0-9]{2})\.([0-9]+)$$/\1.\2.\3.\4/p'),0.0.0.0)
+
 # `go tool` builds tools for $(GOOS), so the Windows lint pass needs a
 # host-built linter binary.
 TOOLS := dist/tools
@@ -69,8 +74,12 @@ version:
 winres:
 	go tool go-winres make --in build/winres.json --out cmd/mink-lasso/rsrc --arch amd64
 
+# The version exists only at build time, so the version resource is patched into
+# the exe instead of living in the committed .syso.
 build:
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(EXE) ./cmd/mink-lasso
+	sed -e 's/@FIXED_VERSION@/$(FIXED_VERSION)/' -e 's/@VERSION@/$(VERSION)/' build/version.json > dist/version.json
+	go tool go-winres patch --in dist/version.json --no-backup $(EXE)
 
 # Run the app natively in headless mode, e.g. against the simulator:
 #   make run RUN_ARGS="-watch /tmp/w -serial G3-1 -address 127.0.0.1:65535"

@@ -14,15 +14,18 @@
 
 // Package winutil isolates the Windows system calls mink-lasso needs — a
 // deny-write file open, network-drive detection, a single-instance mutex,
-// and opening a folder in the file manager — behind a portable API. Every
-// exported function also has a working non-Windows implementation, so the
-// rest of the application never imports golang.org/x/sys/windows directly
-// and every other package builds and tests on macOS and Linux.
+// and opening a folder or showing a file in the file manager — behind a
+// portable API. Every exported function also has a working non-Windows
+// implementation, so the rest of the application never imports
+// golang.org/x/sys/windows directly and every other package builds and
+// tests on macOS and Linux.
 package winutil
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -50,4 +53,39 @@ func isUNC(path string) bool {
 var startCommand = func(name string, args ...string) error {
 	//nolint:gosec // name is one of a fixed set of OS commands, not attacker input
 	return exec.Command(name, args...).Start()
+}
+
+// ShowInFolder opens the folder containing path, a file, in the platform's
+// file manager, selecting the file where the platform supports it. If the
+// file no longer exists — a sent file someone has since deleted, say — its
+// folder is opened instead, and if that is gone too the error says so:
+// asked for a missing path, the file manager would open some unrelated
+// default location. These checks can block for as long as a network share
+// takes to time out, so call this off the UI thread.
+func ShowInFolder(path string) error {
+	path = absPath(path)
+
+	if _, err := os.Stat(path); err == nil {
+		return selectInFolder(path)
+	}
+
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(dir); err != nil {
+		return err
+	}
+
+	return OpenFolder(dir)
+}
+
+// absPath resolves a relative path (from a relative -watch flag, say)
+// against the working directory, leaving it unchanged in the unlikely case
+// that the working directory is unknown. The file manager may be an
+// already-running process with a different working directory, so it must
+// never be handed a relative path.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+
+	return path
 }

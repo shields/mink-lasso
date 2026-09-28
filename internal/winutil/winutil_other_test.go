@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -130,5 +131,67 @@ func TestOpenFolderOther(t *testing.T) {
 
 	if err := OpenFolder("/tmp/x"); !errors.Is(err, wantErr) {
 		t.Errorf("OpenFolder error = %v, want %v", err, wantErr)
+	}
+
+	// ShowInFolder shares this test rather than running in parallel with
+	// it: both replace the package-level startCommand and goos.
+	dir := t.TempDir()
+	file := filepath.Join(dir, "PART.NC")
+	if err := os.WriteFile(file, []byte("G0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	missing := filepath.Join(dir, "OLD.NC")
+
+	showTests := []struct {
+		goos     string
+		path     string
+		wantName string
+		wantArgs []string
+	}{
+		{"darwin", file, "open", []string{"-R", file}},
+		{"linux", file, "xdg-open", []string{dir}},
+		{"darwin", missing, "open", []string{dir}},
+		{"linux", missing, "xdg-open", []string{dir}},
+	}
+
+	for _, tt := range showTests {
+		goos = tt.goos
+
+		var gotName string
+		var gotArgs []string
+		startCommand = func(name string, args ...string) error {
+			gotName, gotArgs = name, args
+			return nil
+		}
+
+		if err := ShowInFolder(tt.path); err != nil {
+			t.Fatalf("ShowInFolder(goos=%s, %s): %v", tt.goos, tt.path, err)
+		}
+
+		if gotName != tt.wantName || !slices.Equal(gotArgs, tt.wantArgs) {
+			t.Errorf("goos=%s, %s: ran %q %q, want %q %q",
+				tt.goos, tt.path, gotName, gotArgs, tt.wantName, tt.wantArgs)
+		}
+	}
+
+	// With its folder gone too, there is nothing to open.
+	ran := false
+	startCommand = func(string, ...string) error {
+		ran = true
+		return nil
+	}
+
+	if err := ShowInFolder(filepath.Join(dir, "gone", "OLD.NC")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ShowInFolder(missing folder) error = %v, want not-exist", err)
+	}
+
+	if ran {
+		t.Error("ShowInFolder(missing folder) started the file manager")
+	}
+
+	startCommand = func(string, ...string) error { return wantErr }
+
+	if err := ShowInFolder(file); !errors.Is(err, wantErr) {
+		t.Errorf("ShowInFolder error = %v, want %v", err, wantErr)
 	}
 }

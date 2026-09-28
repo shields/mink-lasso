@@ -63,7 +63,7 @@ func (s *scheduler) archiveSent(ctx context.Context, it *item) {
 			lastErr = err
 			continue
 		}
-		s.setTerminal(it, Sent, "File sent")
+		s.setTerminalAt(it, Sent, "File sent", dest)
 		return
 	}
 
@@ -130,12 +130,24 @@ func (s *scheduler) wait(ctx context.Context, d time.Duration) bool {
 
 // setTerminal records it's final state for this send attempt and emits it.
 func (s *scheduler) setTerminal(it *item, state TransferState, msg string) {
+	s.setTerminalAt(it, state, msg, "")
+}
+
+// setTerminalAt is setTerminal for a file that now lives at path rather than
+// it.path — an archived send, moved into sent/ — so the event tells the GUI
+// where to find it. An empty path means it.path. Only the event changes:
+// it.path stays the watch-folder location, since that is where any later
+// send of this name reads from.
+func (s *scheduler) setTerminalAt(it *item, state TransferState, msg, path string) {
 	s.mu.Lock()
 	it.state = state
 	it.message = msg
 	name := it.name
 	ev := s.event(it)
 	s.mu.Unlock()
+	if path != "" {
+		ev.Path = path
+	}
 	if state == Sent {
 		s.e.opts.Logger.Info("engine: file sent", "name", name)
 	}

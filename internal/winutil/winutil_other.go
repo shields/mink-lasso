@@ -18,12 +18,13 @@ package winutil
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 )
 
-// goos selects the command OpenFolder runs. It defaults to runtime.GOOS but
-// is a variable so tests can exercise both non-Windows branches without
-// needing to run on both host platforms.
+// goos selects the command OpenFolder and selectInFolder run. It defaults to
+// runtime.GOOS but is a variable so tests can exercise both non-Windows
+// branches without needing to run on both host platforms.
 var goos = runtime.GOOS
 
 // OpenDenyWrite opens path for reading. Non-Windows filesystems have no
@@ -48,15 +49,23 @@ func SingleInstance(_ string) (func(), error) {
 }
 
 // OpenFolder opens path, which must be a directory, in the platform's file
-// manager. Passing a file's path instead is not portable: xdg-open and open
-// launch a file in its default handler rather than revealing it in a
-// folder view, unlike the Windows implementation (which selects a file
-// passed to it inside Explorer).
+// manager. (Given a file instead, xdg-open and open launch it in its
+// default program; ShowInFolder is the way to reveal a file.)
 func OpenFolder(path string) error {
 	name := "xdg-open"
 	if goos == "darwin" {
 		name = "open"
 	}
 
-	return startCommand(name, path)
+	return startCommand(name, absPath(path))
+}
+
+// selectInFolder reveals path in Finder on macOS. xdg-open has no way to
+// select a file, so elsewhere it just opens path's folder.
+func selectInFolder(path string) error {
+	if goos == "darwin" {
+		return startCommand("open", "-R", path)
+	}
+
+	return startCommand("xdg-open", filepath.Dir(path))
 }

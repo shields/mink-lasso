@@ -1,0 +1,24 @@
+{
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "@FIXED_VERSION@",
+          "product_version": "@FIXED_VERSION@"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Michael Shields",
+            "FileDescription": "mink-lasso",
+            "FileVersion": "@VERSION@",
+            "InternalName": "mink-lasso",
+            "LegalCopyright": "Copyright © 2026 Michael Shields",
+            "OriginalFilename": "mink-lasso.exe",
+            "ProductName": "mink-lasso",
+            "ProductVersion": "@VERSION@"
+          }
+        }
+      }
+    }
+  }
+}

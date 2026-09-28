@@ -527,8 +527,22 @@ func (b *binding) onRetry() {
 	}
 }
 
+// onShowInFolder reveals the selected transfer's file in Explorer. The file
+// may be on a network share that has since gone away, and ShowInFolder's
+// check for it would then block for the SMB timeout (about 20 s), so it runs
+// off the UI thread; only an error comes back.
 func (b *binding) onShowInFolder() {
-	if row, ok := b.selectedTransfer(); ok {
-		b.openFolder("Show in folder", row.Path)
+	row, ok := b.selectedTransfer()
+	if !ok || row.Path == "" {
+		return
 	}
+
+	go func() {
+		err := winutil.ShowInFolder(row.Path)
+		if err == nil || b.exited.Load() {
+			return
+		}
+
+		walk.App().Synchronize(func() { b.showError("Show in folder", err) })
+	}()
 }

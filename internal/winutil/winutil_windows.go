@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
@@ -112,12 +114,33 @@ func SingleInstance(name string) (func(), error) {
 	}, nil
 }
 
-// OpenFolder opens path in Explorer. Explorer forwards the request to an
-// existing Explorer process and exits immediately, so its own exit code
-// carries no information — the process is started but never waited on.
-// Unlike the non-Windows implementation, path may name either a directory
-// (opened directly) or a file (selected inside its parent folder); callers
-// that need portable behavior should only ever pass a directory.
+// OpenFolder opens path, which must be a directory, in Explorer. Explorer
+// forwards the request to an existing Explorer process and exits
+// immediately, so its own exit code carries no information — the process is
+// started but never waited on. (Given a file instead, Explorer would open it
+// in its default program; ShowInFolder is the way to reveal a file.)
 func OpenFolder(path string) error {
-	return startCommand("explorer.exe", path)
+	return startCommand("explorer.exe", absPath(path))
+}
+
+// selectInFolder opens path's folder in Explorer with path selected.
+// Explorer parses its own command line and wants the quotes around the path
+// only, as in /select,"C:\my parts\F.NC"; exec.Command would quote the
+// whole argument instead whenever the path contains a space, and Explorer
+// then ignores it and opens a default folder. So the command line is built
+// here by hand. A Windows path cannot contain a double quote, so wrapping
+// it in quotes needs no escaping.
+func selectInFolder(path string) error {
+	return startCommandLine("explorer.exe", `explorer.exe /select,"`+path+`"`)
+}
+
+// startCommandLine is startCommand for a program that parses its command
+// line itself: cmdLine, which must begin with the program name, is passed
+// to CreateProcess exactly as given. It is a variable so tests can replace
+// it instead of launching a real program.
+var startCommandLine = func(name, cmdLine string) error {
+	cmd := exec.Command(name)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdLine}
+
+	return cmd.Start()
 }

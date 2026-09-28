@@ -163,8 +163,10 @@ func (s TransferState) Terminal() bool {
 	}
 }
 
-// TransferEvent reports a change in one file's transfer state. Manual is
-// true only for a file queued through SendFile.
+// TransferEvent reports a change in one file's transfer state. Path is
+// where the engine last knew the file to be: for a watch-folder file it
+// archived after sending, its place in the sent/ subfolder. Manual is true
+// only for a file queued through SendFile.
 type TransferEvent struct {
 	Name    string
 	Path    string

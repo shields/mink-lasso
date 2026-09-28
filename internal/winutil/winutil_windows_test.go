@@ -181,4 +181,82 @@ func TestOpenFolderWindows(t *testing.T) {
 	if err := OpenFolder(path); !errors.Is(err, wantErr) {
 		t.Errorf("OpenFolder error = %v, want %v", err, wantErr)
 	}
+
+	// ShowInFolder shares this test rather than running in parallel with
+	// it: both replace the package-level startCommand.
+	origCmdLine := startCommandLine
+	t.Cleanup(func() { startCommandLine = origCmdLine })
+
+	// A space in the folder name is the case exec.Command's quoting gets
+	// wrong for Explorer.
+	dir := filepath.Join(t.TempDir(), "my parts")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	file := filepath.Join(dir, "PART.NC")
+	if err := os.WriteFile(file, []byte("G0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var gotCmdLine string
+	startCommandLine = func(name, cmdLine string) error {
+		gotName, gotCmdLine = name, cmdLine
+		return nil
+	}
+
+	if err := ShowInFolder(file); err != nil {
+		t.Fatalf("ShowInFolder: %v", err)
+	}
+
+	if gotName != "explorer.exe" {
+		t.Errorf("command = %q, want explorer.exe", gotName)
+	}
+
+	if want := `explorer.exe /select,"` + file + `"`; gotCmdLine != want {
+		t.Errorf("command line = %q, want %q", gotCmdLine, want)
+	}
+
+	// A missing file opens its folder instead.
+	startCommand = func(_ string, args ...string) error {
+		if len(args) > 0 {
+			gotArg = args[0]
+		}
+
+		return nil
+	}
+
+	if err := ShowInFolder(filepath.Join(dir, "OLD.NC")); err != nil {
+		t.Fatalf("ShowInFolder(missing): %v", err)
+	}
+
+	if gotArg != dir {
+		t.Errorf("missing file: opened %q, want %q", gotArg, dir)
+	}
+
+	// With its folder gone too, there is nothing to open.
+	gotArg = ""
+	if err := ShowInFolder(filepath.Join(dir, "gone", "OLD.NC")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ShowInFolder(missing folder) error = %v, want not-exist", err)
+	}
+
+	if gotArg != "" {
+		t.Errorf("missing folder: opened %q, want nothing", gotArg)
+	}
+
+	startCommandLine = func(string, string) error { return wantErr }
+
+	if err := ShowInFolder(file); !errors.Is(err, wantErr) {
+		t.Errorf("ShowInFolder error = %v, want %v", err, wantErr)
+	}
+}
+
+// TestStartCommandLineRunsAProcess exercises the real startCommandLine with
+// a harmless command. Like TestStartCommandRunsAProcess, it runs serially,
+// before TestOpenFolderWindows replaces the var in its parallel phase.
+//
+//nolint:paralleltest // must run serially, before parallel tests override startCommandLine
+func TestStartCommandLineRunsAProcess(t *testing.T) {
+	if err := startCommandLine("cmd.exe", "cmd.exe /c exit"); err != nil {
+		t.Fatalf("startCommandLine: %v", err)
+	}
 }

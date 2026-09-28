@@ -17,6 +17,7 @@ package model
 import (
 	"errors"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -368,6 +369,27 @@ func TestApplyTransferEventUpsertAndOrdering(t *testing.T) {
 	}
 	if rows[1].SizeText != "1.5 kB" {
 		t.Errorf("SizeText = %q, want 1.5 kB", rows[1].SizeText)
+	}
+}
+
+// TestApplyTransferEventPath checks that a row carries its latest event's
+// Path, which "Show in folder" reveals: a Sent event's points into sent/,
+// and a later event for the same name replaces it.
+func TestApplyTransferEventPath(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	sent := filepath.Join("/watch", "sent", "A.NC")
+	watched := filepath.Join("/watch", "A.NC")
+
+	m.Apply(engine.TransferEvent{Name: "A.NC", Path: sent, State: engine.Sent, At: at})
+	if got := m.Transfers()[0].Path; got != sent {
+		t.Errorf("Path after Sent = %q, want %q", got, sent)
+	}
+
+	m.Apply(engine.TransferEvent{Name: "A.NC", Path: watched, State: engine.Pending, At: at.Add(time.Second)})
+	if got := m.Transfers()[0].Path; got != watched {
+		t.Errorf("Path after Pending = %q, want %q", got, watched)
 	}
 }
 
