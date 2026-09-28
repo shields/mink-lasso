@@ -73,6 +73,16 @@ import (
 // StartAlreadyStarted returns ErrTransferOpen without trying to free the
 // transfer, since a client cannot tell whether that transfer is the
 // controller's current one.
+//
+// One case Upload cannot catch: if the reply to the first start request is
+// lost and this file's name is stuck from a displaced transfer, the resend
+// draws StartAlreadyStarted, which Upload takes for its own transfer. The
+// chunks it then sends go to the controller's current transfer, another
+// file's, and their ACKs may even look like success. Nothing in the replies
+// tells the two apart (docs/protocol.md §5.1, §5.5); it takes a lost reply
+// and a stuck name together, and a displaced transfer arises only when a
+// client stops partway through an upload and a start for another file
+// follows.
 func (c *Client) Upload(
 	ctx context.Context, dir, name string, r io.ReaderAt, size int64, progress func(sent, total int64),
 ) error {
