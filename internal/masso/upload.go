@@ -60,6 +60,14 @@ import (
 // acknowledged, since aborting then risks leaving a partial file on the
 // controller's USB drive.
 //
+// If the first start request draws StartAlreadyStarted, a transfer of this
+// file is still open on the controller, left by a client that never sent
+// the upload-abort notification. Upload then sends that notification three
+// times, Options.AbortInterval apart, waits one more AbortInterval, and
+// starts again once, as above; only if that start draws StartAlreadyStarted
+// too, as it does for a transfer another file's start displaced
+// (docs/protocol.md §5.5), does Upload return ErrTransferOpen.
+//
 // If the start request drew any reply from the controller and the transfer
 // did not go on to end cleanly — a start ACK carrying an error result, a
 // chunk-ACK error result, a read error, or either give-up above — Upload
@@ -94,6 +102,18 @@ func (c *Client) Upload(
 
 	sf := &sendFailures{}
 	answered, err := c.startUpload(ctx, remote, startPkt, sf)
+	if errors.Is(err, ErrTransferOpen) {
+		// A transfer of this file is still open, left by a client that
+		// never sent the upload-abort notification; sending it frees the
+		// name (docs/protocol.md §5.5). The controller answers each
+		// notification with a canceled chunk ACK, so wait one more
+		// interval for those to arrive, and be dropped, before anything
+		// waits for chunk ACKs.
+		c.logger.Info("masso: upload: freeing a transfer of this file the controller still had open", "name", name)
+		c.notifyAbort(remote)
+		<-c.clock.After(c.abortInterval)
+		answered, err = c.startUpload(ctx, remote, startPkt, sf)
+	}
 	if err != nil {
 		if answered {
 			c.notifyAbort(remote)

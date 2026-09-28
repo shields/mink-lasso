@@ -438,7 +438,13 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // notifications (docs/protocol.md §5.5).
 func expectAborts(t *testing.T, s *sim.Controller) {
 	t.Helper()
-	const want = 3
+	expectAbortCount(t, s, 3)
+}
+
+// expectAbortCount waits for want upload-abort notifications to reach s and
+// fails if more than want have.
+func expectAbortCount(t *testing.T, s *sim.Controller, want int) {
+	t.Helper()
 	eventually(t, fmt.Sprintf("%d upload-abort notifications", want), func() bool { return s.Aborts() >= want })
 	if got := s.Aborts(); got != want {
 		t.Fatalf("Aborts() = %d, want %d", got, want)
@@ -592,10 +598,13 @@ func TestUploadStartResults(t *testing.T) {
 		name   string
 		result byte
 		want   error
+		aborts int
 	}{
-		{"no USB", masso.StartNoUSB, masso.ErrNoUSB},
-		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransferOpen},
-		{"other error", 0x42, masso.ErrTransfer},
+		{"no USB", masso.StartNoUSB, masso.ErrNoUSB, 3},
+		// Every start draws the result, so the one Upload sends after
+		// freeing the transfer is refused too, and aborted in turn.
+		{"already started on first attempt", masso.StartAlreadyStarted, masso.ErrTransferOpen, 6},
+		{"other error", 0x42, masso.ErrTransfer, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -614,7 +623,7 @@ func TestUploadStartResults(t *testing.T) {
 			if _, ok := s.File("ST.NC"); ok {
 				t.Fatal("file stored despite the refused start")
 			}
-			expectAborts(t, s)
+			expectAbortCount(t, s, tc.aborts)
 		})
 	}
 }
