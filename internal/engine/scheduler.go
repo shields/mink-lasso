@@ -810,7 +810,8 @@ func failureMessage(err error) failureWording {
 // the same text in Go's lowercase error convention; the capitalization and
 // the "ERROR: " prefix are deliberate, not drift. ErrTransferOpen is the
 // exception: Masso Link shows its generic transfer error there, and only
-// canceling on the Masso's screen clears it, so this says so instead.
+// canceling on the Masso's screen, or restarting it, clears it, so this
+// says so instead.
 func operatorText(err error) string {
 	switch {
 	case errors.Is(err, masso.ErrNoUSB):
@@ -822,7 +823,8 @@ func operatorText(err error) string {
 	case errors.Is(err, masso.ErrUSBWrite):
 		return "Unable to write file to USB"
 	case errors.Is(err, masso.ErrTransferOpen):
-		return "An earlier transfer of this file is still open on the Masso; cancel it on the Masso's screen"
+		return "An earlier transfer of this file is still open on the Masso; " +
+			"cancel it on the Masso's screen, or restart the Masso if nothing is showing"
 	case errors.Is(err, masso.ErrTransfer):
 		return "Error occurred while transferring file"
 	default:

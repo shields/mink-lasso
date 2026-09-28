@@ -462,8 +462,11 @@ chunk 0 is what the controller expects. `0xF7` is not tied to retransmission as
 such: a first start request for a file name also drew `0xF7` while an earlier,
 never-completed transfer had left that name open (§5.5), which suggests it means
 "a transfer of this file is already open." A start for a _different_ file, sent
-while another transfer was open, drew `0x00`; which of the two transfers the
-controller then continues is unverified.
+while another transfer was open, drew `0x00`, and the controller then continues
+only the new one: it holds one transfer at a time. A chunk sent afterward for
+the displaced file is taken as the new transfer's (probe: once the new transfer
+had completed its two chunks, the displaced file's chunk 0 drew an ACK with
+accepted count 2). The displaced transfer is never closed; see §5.5.
 
 Bytes 6–9 of a start ACK carry no information: they are whatever the
 controller's previous reply left at those offsets (probe: `00 FF 97 01`, bytes
@@ -639,12 +642,13 @@ showing "Receiving" with the file's name and the progress reached (98%) until
 the transfer was canceled by hand on the controller. In another (four chunks,
 two accepted, then one more after `0x0C`), nothing was showing afterward;
 whether the screen cleared on the signal, on the refused chunk, or by timing out
-was not observed. And after a run that started one file, then another before
-chunking the first, then sent `0x0C`, every later first start request for the
-first file drew `0xF7` (§5.1), across several runs, with nothing on the screen;
-that file existed on the drive. After a hand cancel, a start for the canceled
-file drew `0x00` again. The status packet (§4) showed none of this (idle, empty
-file name).
+was not observed. A transfer displaced by a start for another file (§5.1) is
+worse off: the controller never closes it. Its file stays on the drive at 0
+bytes, the controller refuses to delete it, and every later first start request
+for that name draws `0xF7`, with nothing on the screen, until the controller
+restarts; after a restart, a start for it drew `0x00` again. After a hand
+cancel, a start for the canceled file likewise drew `0x00` again. The status
+packet (§4) showed none of this (idle, empty file name).
 
 What the drive held afterward, read back on a PC:
 

@@ -76,8 +76,9 @@ var (
 	// ErrTransferOpen indicates the controller answered a first start
 	// request with StartAlreadyStarted: it is still receiving the same file
 	// from an earlier transfer that never finished, which only canceling on
-	// the Masso's own screen ends (docs/protocol.md §5.1, §5.5). Masso Link
-	// reports this as ErrTransfer; this text is mink-lasso's own.
+	// the Masso's own screen or, if nothing shows there, restarting the
+	// Masso ends (docs/protocol.md §5.1, §5.5). Masso Link reports this as
+	// ErrTransfer; this text is mink-lasso's own.
 	ErrTransferOpen = errors.New("an earlier transfer of this file is still open on Masso")
 
 	// ErrUSBWrite indicates the controller could not write a chunk to its

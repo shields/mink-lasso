@@ -218,15 +218,22 @@ func probeQ3(t *testing.T, h *probeHarness) {
 		"remove the USB drive from the controller and rerun `make probe`; " +
 		"this run proceeds regardless and logs whatever result the controller reports")
 
+	// A start sent while another transfer is open leaves the first one
+	// stuck on the controller until it restarts, drawing 0xF7 for its name
+	// (docs/protocol.md §5.5), so each run uses fresh names: 12 bits of the
+	// clock keep them within masso.MaxFileName.
+	suffix := fmt.Sprintf("%03X", time.Now().UnixMilli()&0xFFF)
+	nameA, nameB := "MLTESTQ3A"+suffix+".NC", "MLTESTQ3B"+suffix+".NC"
+
 	dataA := nChunkFileData("q3a", 1)
 
-	startA, err := masso.UploadStart(uint32(len(dataA)&0xFFFFFFFF), "", "MLTESTQ3A.NC")
+	startA, err := masso.UploadStart(uint32(len(dataA)&0xFFFFFFFF), "", nameA)
 	if err != nil {
 		t.Fatalf("PROBE Q3: building first start request: %v", err)
 	}
 
 	trA, rawA := h.startTransfer(t, startA, dataA)
-	logPacket(t, "PROBE Q3", "first start ACK (MLTESTQ3A.NC)", rawA)
+	logPacket(t, "PROBE Q3", "first start ACK ("+nameA+")", rawA)
 
 	if !trA.open {
 		t.Skip("PROBE Q3: first start not accepted; nothing is open to send a second start against")
@@ -234,7 +241,7 @@ func probeQ3(t *testing.T, h *probeHarness) {
 
 	dataB := nChunkFileData("q3b", 2)
 
-	startB, err := masso.UploadStart(uint32(len(dataB)&0xFFFFFFFF), "", "MLTESTQ3B.NC")
+	startB, err := masso.UploadStart(uint32(len(dataB)&0xFFFFFFFF), "", nameB)
 	if err != nil {
 		t.Fatalf("PROBE Q3: building second start request: %v", err)
 	}
@@ -246,16 +253,16 @@ func probeQ3(t *testing.T, h *probeHarness) {
 	if !ok {
 		t.Logf("PROBE Q3: no reply to a start sent while another transfer was open within %s; "+
 			"question 3 was not exercised this run", probeReplyWait)
-		trA.finish(t, "PROBE Q3 MLTESTQ3A.NC")
+		trA.finish(t, "PROBE Q3 "+nameA)
 
 		return
 	}
 
-	logPacket(t, "PROBE Q3", "second start ACK, a start sent while another transfer is open (MLTESTQ3B.NC)", rawB)
+	logPacket(t, "PROBE Q3", "second start ACK, a start sent while another transfer is open ("+nameB+")", rawB)
 
 	if trB.open {
 		t.Log("PROBE Q3: a start sent while another transfer was open was accepted; question 3 was not exercised this run")
-		trB.finish(t, "PROBE Q3 MLTESTQ3B.NC")
+		trB.finish(t, "PROBE Q3 "+nameB)
 	} else {
 		t.Log("PROBE Q3: a start sent while another transfer was open was not accepted; " +
 			"sending its chunks to see whether the controller stores them anyway")
@@ -273,7 +280,7 @@ func probeQ3(t *testing.T, h *probeHarness) {
 
 	// The first transfer's chunk ACK shows whether the controller still
 	// had it open after the second start.
-	trA.finish(t, "PROBE Q3 MLTESTQ3A.NC")
+	trA.finish(t, "PROBE Q3 "+nameA)
 }
 
 // probeQ4 addresses docs/protocol-questions.md Q4: whether the controller

@@ -689,7 +689,8 @@ func TestFailureMessage(t *testing.T) {
 		{"transfer", masso.ErrTransfer, false, "Error occurred while transferring file"},
 		{
 			"transfer open", masso.ErrTransferOpen, false,
-			"An earlier transfer of this file is still open on the Masso; cancel it on the Masso's screen",
+			"An earlier transfer of this file is still open on the Masso; " +
+				"cancel it on the Masso's screen, or restart the Masso if nothing is showing",
 		},
 		{
 			"wrapped", fmt.Errorf("upload: %w", masso.ErrNoUSB), false,
