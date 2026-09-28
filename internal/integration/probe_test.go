@@ -573,15 +573,15 @@ type probeQ12Result struct {
 	thirtyThreeAccepted, thirtyThreeComplete bool
 }
 
-// probeQ12 addresses the length half of docs/protocol.md §5's Filename
-// rules: the app's 15-character limit is a documented assumption, not yet
-// tested against real hardware, and Masso Link itself checks nothing
-// narrower than 255 characters. It uploads two comments-only files whose
-// names are one character over that limit (masso.MaxFileName+1, 16) and as
-// long as the status reply's file-name field can hold (masso.MaxStatusFile,
-// 33 — docs/protocol.md §4); masso.UploadStart itself refuses to build a
-// request for either, so probeQ12Upload hand-builds them instead. It
-// returns its observations for probeQ9 to use explicitly.
+// probeQ12 addresses docs/protocol-questions.md Q12, the longest file name
+// the controller accepts: it has accepted 33 characters, and Masso Link
+// itself checks nothing narrower than 255 (docs/protocol.md §5). It uploads
+// two comments-only files, one whose name is one character over mink-lasso's
+// own limit (masso.MaxFileName+1, 34), which masso.UploadStart refuses to
+// build, and one exactly as long as the status reply's file-name field can
+// hold (masso.MaxStatusFile, 33 — docs/protocol.md §4). probeQ12Upload
+// hand-builds both. It returns its observations for probeQ9 to use
+// explicitly.
 func probeQ12(t *testing.T, h *probeHarness) probeQ12Result {
 	t.Helper()
 

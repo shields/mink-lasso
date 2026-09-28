@@ -122,7 +122,7 @@ func TestValidateUpload(t *testing.T) {
 	if err := validateUpload("", "PART.NC"); err != nil {
 		t.Errorf("validateUpload(root, PART.NC) = %v, want nil", err)
 	}
-	if err := validateUpload("JOBS", "THIS-NAME-IS-TOO-LONG.NC"); !errors.Is(err, masso.ErrBadFileName) {
+	if err := validateUpload("JOBS", "THIS-NAME-IS-FAR-TOO-LONG-FOR-A-MASSO.NC"); !errors.Is(err, masso.ErrBadFileName) {
 		t.Errorf("validateUpload with a bad name = %v, want ErrBadFileName", err)
 	}
 	if err := validateUpload("JO:BS", "PART.NC"); !errors.Is(err, masso.ErrBadUploadDir) {
@@ -361,7 +361,7 @@ func TestRetryOfInvalidFileRejectsAgain(t *testing.T) {
 		want      error
 	}{
 		{"30\u00b0", "A.NC", masso.ErrBadUploadDir},
-		{"", "THIS-NAME-IS-TOO-LONG.NC", masso.ErrBadFileName},
+		{"", "THIS-NAME-IS-FAR-TOO-LONG-FOR-A-MASSO.NC", masso.ErrBadFileName},
 	} {
 		t.Run(tc.want.Error(), func(t *testing.T) {
 			t.Parallel()

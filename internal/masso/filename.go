@@ -25,7 +25,7 @@ import (
 var Extensions = []string{".nc", ".txt", ".cnc", ".tap", ".eia", ".htg", ".wiz", ".gcode", ".ngc"}
 
 // ValidateFileName reports whether name is a valid Masso upload file name:
-// 1-15 printable-ASCII bytes (0x20-0x7E), excluding '\', '/', and ':', and
+// 1 to MaxFileName printable-ASCII bytes (0x20-0x7E), excluding '\', '/', and ':', and
 // excluding the reserved names "." and "..". It wraps ErrBadFileName with
 // the specific reason.
 func ValidateFileName(name string) error {

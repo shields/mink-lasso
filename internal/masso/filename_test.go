@@ -26,7 +26,8 @@ func TestValidateFileNameValid(t *testing.T) {
 	tests := []string{
 		"A",
 		"CLTEST.NC",
-		"123456789012345", // exactly 15 characters
+		"123456789012345",                   // 15 characters, the old limit
+		"MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC", // exactly 33 characters
 		"a b~c!",
 	}
 	for _, name := range tests {
@@ -44,7 +45,7 @@ func TestValidateFileNameInvalid(t *testing.T) {
 		reason string
 	}{
 		{"", "empty"},
-		{"1234567890123456", "16 characters, one too many"},
+		{"MLTESTQ12-XXXXXXXXXXXXXXXXXXXXX.NC", "34 characters, one too many"},
 		{".", "reserved current-directory name"},
 		{"..", "reserved parent-directory name"},
 		{"a\\b", "backslash"},
@@ -64,8 +65,8 @@ func TestValidateFileNameInvalid(t *testing.T) {
 func TestValidateFileNameMaxLength(t *testing.T) {
 	t.Parallel()
 
-	if MaxFileName != 15 {
-		t.Fatalf("MaxFileName = %d, want 15", MaxFileName)
+	if MaxFileName != 33 {
+		t.Fatalf("MaxFileName = %d, want 33", MaxFileName)
 	}
 	ok := strings.Repeat("x", MaxFileName)
 	if err := ValidateFileName(ok); err != nil {

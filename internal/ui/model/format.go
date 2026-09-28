@@ -296,7 +296,7 @@ func (m *Model) AboutText() string {
 			"Licensed under the Apache License, Version 2.0.\n\n"+
 			"An auto-sending replacement for Masso Link: it watches a folder and "+
 			"uploads each G-code file to a Masso controller as soon as it settles.\n\n"+
-			"File names are limited to %d characters by the Masso controller.",
+			"File names are limited to %d characters, the most the Masso reports in full.",
 		m.version, masso.MaxFileName,
 	)
 }

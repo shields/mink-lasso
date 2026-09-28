@@ -35,9 +35,11 @@ const (
 	// chunk (TypeUploadChunk) may carry.
 	MaxChunkData = 1422
 
-	// MaxFileName is the longest file name, in ASCII bytes, the controller
-	// accepts for an upload.
-	MaxFileName = 15
+	// MaxFileName is the longest file name, in ASCII bytes, mink-lasso
+	// uploads: the longest a status reply can report in full
+	// (MaxStatusFile). A real controller accepted and stored names this
+	// long; the longest it accepts is untested (docs/protocol.md §5).
+	MaxFileName = MaxStatusFile
 
 	// MaxUploadDir is the longest upload directory, in bytes, that fits the
 	// upload-start request's one-byte path length.

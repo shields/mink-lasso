@@ -544,12 +544,12 @@ func TestSchedulerRejectedPassthrough(t *testing.T) {
 	events, _ := runEngine(t, e)
 	waitForEvent(t, events, isConnState(Connected))
 
-	// A name over masso.MaxFileName (15 bytes) fails ValidateFileName.
-	writeFile(t, dir, "THIS-NAME-IS-TOO-LONG.NC", []byte("x"))
+	// A name over masso.MaxFileName (33 bytes) fails ValidateFileName.
+	writeFile(t, dir, "THIS-NAME-IS-FAR-TOO-LONG-FOR-A-MASSO.NC", []byte("x"))
 
 	ev := waitForEvent(t, events, func(ev Event) bool {
 		te, ok := ev.(TransferEvent)
-		return ok && te.Name == "THIS-NAME-IS-TOO-LONG.NC" && te.State == Rejected
+		return ok && te.Name == "THIS-NAME-IS-FAR-TOO-LONG-FOR-A-MASSO.NC" && te.State == Rejected
 	})
 	if asTransferEvent(t, ev).Message == "" {
 		t.Error("Rejected event has empty Message, want the validation reason")

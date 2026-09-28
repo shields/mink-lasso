@@ -144,7 +144,8 @@ func TestUploadStartLength(t *testing.T) {
 		{"", "ABCDEFGHIJK.TAP", 34},
 		{"JOBS", "CLTEST.NC", 30},
 		{`JOBS\SUB`, "CLTEST.NC", 34},
-		{strings.Repeat("D", MaxUploadDir), "ABCDEFGHIJK.TAP", 2 + roundUp4(MaxUploadDir+MaxFileName+15)},
+		{strings.Repeat("D", MaxUploadDir), "ABCDEFGHIJK.TAP", 2 + roundUp4(MaxUploadDir+len("ABCDEFGHIJK.TAP")+15)},
+		{"", strings.Repeat("N", MaxFileName), 2 + roundUp4(1+MaxFileName+15)},
 	}
 	for _, tt := range tests {
 		got, err := UploadStart(1, tt.dir, tt.name)

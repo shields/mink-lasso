@@ -163,7 +163,7 @@ func TestTitleAndAboutText(t *testing.T) {
 	if !strings.Contains(about, "0.20260824.1") {
 		t.Errorf("AboutText() = %q, want version included", about)
 	}
-	if !strings.Contains(about, "15 characters") {
+	if !strings.Contains(about, "33 characters") {
 		t.Errorf("AboutText() = %q, want the file name limit mentioned", about)
 	}
 	if !strings.Contains(about, "Apache License") {
