@@ -27,6 +27,15 @@ These need a real controller; `protocol.md` records each as unverified.
     another file without `0x0C` first stays open, and its name draws `0xF7`,
     until the controller restarts (§5.5). Is there any packet that frees it?
 
+## Unexplained observations
+
+15. **Identity replies and a transfer timeout.** Once, with no transfer of ours
+    open and the controller's screen still showing an earlier transfer stopped
+    by `0x0C` (§5.5), a start request drew no reply for 2 s; the resend, and the
+    status request after it, drew identity replies (§3.1) instead, and the
+    controller's screen showed "File transfer error, timeout" naming no file,
+    which later cleared. What triggers this, and which transfer timed out?
+
 ## Replies
 
 7. **Config reply.** The config reply (§3.2) echoes the serial's low 16 bits in
