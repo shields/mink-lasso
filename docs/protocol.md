@@ -411,22 +411,21 @@ directly inside a dropped folder named `JOBS`, or `JOBS\SUB` one level deeper:
   local error; both fields are Pascal short strings of at most 255 bytes, so it
   cannot fire.
 
-No packet exists for creating a directory on the controller. Whether the
-controller creates missing directories itself, or requires them to already
-exist, is unverified — and so is which result, if any, a start ACK or the first
-chunk ACK carries when the directory named in the path field does not exist;
-nothing in the client distinguishes that case from any other transfer error. A
+No packet exists for creating a directory on the controller, and none is needed:
+(probe) the controller creates a directory named in the path field that does not
+yet exist, answering the start with `0x00` and storing the file in it. A
 folder-dropped file is added to the same upload queue as any other file (above)
 and sent through the same per-file start/chunks/ACK sequence, so if the
 controller does report some distinct result for a missing directory, Masso
 Link's existing per-file abort and whole-queue-stop handling (§5.4, §5.6) would
 apply to it the same as any other transfer error; whether the send/queue code
 also carries some folder-specific branch beyond that was not checked in this
-pass. Which bytes a directory name may contain on the wire, and whether one path
-component has a length limit narrower than the 255-byte path field as a whole,
-remain controller-side questions the client binaries do not resolve; what Masso
-Link itself does or does not validate before sending a directory name is set out
-above.
+pass. (probe) The controller accepted, created, and stored a file in each of six
+directories under `MLTEST\` whose names had an embedded space, an embedded
+period, a trailing period, a trailing space, the punctuation
+`!@#$%^&()_+-=[]{}',;~`, and a single 209-byte component. Whether it stores a
+trailing space or period verbatim was not checked. What Masso Link itself does
+or does not validate before sending a directory name is set out above.
 
 **Start ACK** (10 bytes, type `0x0A`): byte 5 is the result:
 
@@ -625,15 +624,23 @@ condition.
 (probe) The controller does reply: each `0x0C` draws a 10-byte chunk ACK (type
 `0x0B`) with result `0x02` and bytes 6–9 spelling `USER`, so three packets draw
 three replies. A client that keeps using the same socket must read or discard
-them, or it will take them for the replies to its next requests. Despite the
-`USER` result, `0x0C` does **not** end the transfer on the controller: its
-screen went on showing "Receiving" with the file's name and the progress reached
-(98% after one of two chunks) until the transfer was canceled by hand on the
-controller, and a later start request for the same file drew `0xF7` (§5.1). The
-status packet (§4) showed no sign of the open transfer (idle, empty file name).
-Still untested: whether any packet closes an open transfer from the client side,
-what the controller does with the partial file when the transfer is canceled by
-hand, and whether it stores chunks sent after `0x0C`.
+them, or it will take them for the replies to its next requests. A chunk of the
+same transfer sent after `0x0C` draws that same `USER` ACK, so the controller no
+longer accepts the transfer's data.
+
+It does not always let go of the transfer, though. In one run (two chunks, the
+second sent before the first, one accepted), the controller's screen went on
+showing "Receiving" with the file's name and the progress reached (98%) until
+the transfer was canceled by hand on the controller. In another (four chunks,
+two accepted, then one more after `0x0C`), nothing was showing afterward;
+whether the screen cleared on the signal, on the refused chunk, or by timing out
+was not observed. And after a run that started one file, then another before
+chunking the first, then sent `0x0C`, every later first start request for the
+first file drew `0xF7` (§5.1), across several runs, with nothing on the screen;
+that file existed on the drive. After a hand cancel, a start for the canceled
+file drew `0x00` again. The status packet (§4) showed none of this (idle, empty
+file name). Still untested: whether any packet reliably releases a transfer from
+the client side, and what the controller does with the partial file.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 

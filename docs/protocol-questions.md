@@ -17,23 +17,16 @@ These need a real controller; `protocol.md` records each as unverified.
    Link never sends a chunk after one (§5.1). A start for another file while a
    transfer is open is accepted (§5.1), so removing the USB drive (`0xE9`) is
    the only known way to draw an error.
-4. **After `0x0C`.** The controller keeps the transfer open (§5.5). Does it
-   store chunks sent after `0x0C`, and what accepted count does it report for
-   them? What happens to the partial file when the transfer is canceled by hand
-   on the controller?
-5. **Missing directories.** Does the controller create a directory named in the
-   start packet's path field (§5.1) that does not yet exist? If not, which
-   result does the start ACK, or the first chunk ACK, carry?
-6. **Directory names.** Which bytes may a directory name in the path field
-   contain, and is there a limit on one component's length beyond the path
-   field's 255 bytes? Masso Link checks neither (§5.1).
+4. **After `0x0C`.** The controller refuses chunks sent after `0x0C` but does
+   not always release the transfer (§5.5). What decides whether its "Receiving"
+   screen clears, and what happens to the partial file?
 
 ## Open transfers
 
 13. **Closing an open transfer.** Is there any packet by which a client can end
     a transfer the controller has open, short of sending every chunk? `0x0C`
-    does not (§5.5). If not, how does a transfer that Masso Link gives up on
-    ever end, other than by hand on the controller?
+    does not reliably (§5.5). If not, how does a transfer that Masso Link gives
+    up on ever end, other than by hand on the controller?
 
 ## Replies
 
