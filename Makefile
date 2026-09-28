@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build coverage fmt integration lint probe run sim test version winres
+.PHONY: build coverage fmt integration lint package probe run sim test version winres
 
 GO_TEST_FLAGS ?= -race -count=1
 COVERAGE_FILE := coverage.out
-EXE := dist/mink-lasso.exe
+EXE := dist/Mink Lasso.exe
 
 # Packages held to 100% statement coverage. The walk binding needs a Windows
 # desktop session and the main packages are one-liners, so they are excluded.
@@ -77,9 +77,13 @@ winres:
 # The version exists only at build time, so the version resource is patched into
 # the exe instead of living in the committed .syso.
 build:
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(EXE) ./cmd/mink-lasso
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o "$(EXE)" ./cmd/mink-lasso
 	sed -e 's/@FIXED_VERSION@/$(FIXED_VERSION)/' -e 's/@VERSION@/$(VERSION)/' build/version.json > dist/version.json
-	go tool go-winres patch --in dist/version.json --no-backup $(EXE)
+	go tool go-winres patch --in dist/version.json --no-backup "$(EXE)"
+
+# GitHub replaces spaces in release asset names; a ZIP preserves the exe's name.
+package: build
+	zip -j -FS dist/mink-lasso.zip "$(EXE)"
 
 # Run the app natively in headless mode, e.g. against the simulator:
 #   make run RUN_ARGS="-watch /tmp/w -serial G3-1 -address 127.0.0.1:65535"
@@ -91,7 +95,7 @@ sim:
 
 # Runs against a real controller; every test skips unless MINK_LASSO_SERIAL is set.
 integration: build
-	MINK_LASSO_EXE=$(abspath $(EXE)) go test -tags integration -count=1 -v -timeout 15m ./internal/integration/...
+	MINK_LASSO_EXE="$(CURDIR)/$(EXE)" go test -tags integration -count=1 -v -timeout 15m ./internal/integration/...
 
 # Runs the opt-in controller probes that check docs/protocol.md; every
 # probe skips unless MINK_LASSO_SERIAL is set. See README.md's "Controller

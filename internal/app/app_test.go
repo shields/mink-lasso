@@ -110,7 +110,7 @@ func testDeps(t *testing.T) testEnv {
 		},
 		UserConfigDir: func() (string, error) { return filepath.Join(tmp, "config"), nil },
 		UserCacheDir:  func() (string, error) { return filepath.Join(tmp, "cache"), nil },
-		Executable:    func() (string, error) { return filepath.Join(tmp, "bin", "mink-lasso.exe"), nil },
+		Executable:    func() (string, error) { return filepath.Join(tmp, "bin", "Mink Lasso.exe"), nil },
 		SingleInstance: func(string) (func(), error) {
 			return func() {}, nil
 		},

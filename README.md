@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# mink-lasso
+# Mink Lasso
 
 ![Mink encircled by a gold lasso](build/icon.png)
 
@@ -30,10 +30,10 @@ This is a clean-room implementation of the protocol described in
 
 ## Install
 
-Download `mink-lasso.exe` from the latest
-[release](https://github.com/shields/mink-lasso/releases) and put it anywhere.
-There is no installer and nothing else to install; it runs on 64-bit Windows 10
-and 11.
+Download `mink-lasso.zip` from the latest
+[release](https://github.com/shields/mink-lasso/releases), extract
+`Mink Lasso.exe`, and put it anywhere. There is no installer and nothing else to
+install; it runs on 64-bit Windows 10 and 11.
 
 On first launch, enter the controller's serial number (`G3-12345`, as shown on
 the controller's F1 screen and in Masso Link) and choose the folder your CAM
@@ -109,10 +109,10 @@ set `uploadWhileMachining` in the configuration.
 ### One client at a time
 
 A Masso controller talks to a single client, and every discovery broadcast
-re-targets every controller that hears it. Close Masso Link while mink-lasso is
-running, and run only one instance of mink-lasso per controller (a second
+re-targets every controller that hears it. Close Masso Link while Mink Lasso is
+running, and run only one instance of Mink Lasso per controller (a second
 instance on the same PC refuses to start). If you have several controllers on
-one network, each PC running mink-lasso should be configured with the address of
+one network, each PC running Mink Lasso should be configured with the address of
 its controller (`address`) so it can connect without broadcasting.
 
 ### Firewall
@@ -153,8 +153,10 @@ kept).
 
 ## Command line
 
-```text
-mink-lasso.exe [-headless] [-config FILE] [-log-dir DIR] [-watch DIR] [-serial G3-12345] [-address HOST:PORT] [-log-level LEVEL] [-version]
+In PowerShell:
+
+```powershell
+& ".\Mink Lasso.exe" [-headless] [-config FILE] [-log-dir DIR] [-watch DIR] [-serial G3-12345] [-address HOST:PORT] [-log-level LEVEL] [-version]
 ```
 
 `-headless` runs without a window, logging to the log file and also to standard
@@ -168,13 +170,13 @@ second build from August 25, 2026 (UTC). The exe's Properties dialog shows the
 same product version, and file version `2026.8.25.2`, because Windows holds that
 one as four 16-bit numbers.
 
-`mink-lasso.exe` never has a console window, even with `-headless`: nothing
+`Mink Lasso.exe` never has a console window, even with `-headless`: nothing
 reads its standard output unless the launcher redirected it, and `Ctrl+C` has
-nothing to reach. Stop it with `taskkill /IM mink-lasso.exe /F` or from Task
+nothing to reach. Stop it with `taskkill /IM "Mink Lasso.exe" /F` or from Task
 Manager. `make run` (`go run`, on any OS) builds a console program instead, so
 `Ctrl+C` works there.
 
-If another instance is already running, mink-lasso says so and exits with status
+If another instance is already running, Mink Lasso says so and exits with status
 1; it exits the same way, naming Masso Link as the likely cause, if the UDP port
 range is already in use. A bad flag, or `-headless` omitted on a platform with
 no GUI, exits with status 2.
@@ -183,8 +185,10 @@ no GUI, exits with status 2.
 
 Everything goes through `make`: `make lint`, `make test`, `make coverage`
 (requires 100% statement coverage), `make build` (cross-compiles
-`dist/mink-lasso.exe` from any OS; needs nothing but Go), `make fmt`. Run
-`lefthook install` once after cloning so `make lint` runs before every commit.
+`dist/Mink Lasso.exe` from any OS; needs nothing but Go), `make package` (builds
+and packages the exe in `dist/mink-lasso.zip`; also needs `zip`), `make fmt`.
+Run `lefthook install` once after cloning so `make lint` runs before every
+commit.
 
 The GUI needs Windows, but everything else builds and tests on macOS and Linux.
 `make sim` runs a simulated controller and

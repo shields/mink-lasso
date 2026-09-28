@@ -261,7 +261,7 @@ func (m *Model) TrayTooltip() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return "mink-lasso — " + m.trayStatus() + " — " + pendingText(m.pendingCountLocked())
+	return "Mink Lasso — " + m.trayStatus() + " — " + pendingText(m.pendingCountLocked())
 }
 
 // trayStatus is a short connection-state phrase for the tray tooltip.
@@ -284,7 +284,7 @@ func (m *Model) trayStatus() string {
 }
 
 // Title is the application's window/title-bar name.
-func (*Model) Title() string { return "mink-lasso" }
+func (*Model) Title() string { return "Mink Lasso" }
 
 // AboutText is the Help > About dialog's body text.
 func (m *Model) AboutText() string {
@@ -292,7 +292,7 @@ func (m *Model) AboutText() string {
 	defer m.mu.Unlock()
 
 	return fmt.Sprintf(
-		"mink-lasso %s\n"+
+		"Mink Lasso %s\n"+
 			"Licensed under the Apache License, Version 2.0.\n\n"+
 			"An auto-sending replacement for Masso Link: it watches a folder and "+
 			"uploads each G-code file to a Masso controller as soon as it settles.\n\n"+

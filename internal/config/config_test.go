@@ -486,7 +486,7 @@ func TestDefaultPath_fallsBackToExecutable(t *testing.T) {
 	errNoProfile := errors.New("no profile")
 	got, err := DefaultPath(
 		func() (string, error) { return "", errNoProfile },
-		func() (string, error) { return "/opt/mink-lasso/mink-lasso.exe", nil },
+		func() (string, error) { return "/opt/mink-lasso/Mink Lasso.exe", nil },
 	)
 	if err != nil {
 		t.Fatalf("DefaultPath: %v", err)

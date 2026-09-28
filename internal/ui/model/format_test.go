@@ -147,7 +147,7 @@ func TestTrayTooltip(t *testing.T) {
 	m.Apply(engine.TransferEvent{Name: "A.NC", State: engine.Pending, At: time.Now()})
 	m.Apply(engine.TransferEvent{Name: "B.NC", State: engine.Waiting, At: time.Now()})
 
-	want := "mink-lasso — Connected to G3-12345 — 2 files waiting"
+	want := "Mink Lasso — Connected to G3-12345 — 2 files waiting"
 	if got := m.TrayTooltip(); got != want {
 		t.Errorf("TrayTooltip() = %q, want %q", got, want)
 	}
@@ -156,12 +156,12 @@ func TestTrayTooltip(t *testing.T) {
 func TestTitleAndAboutText(t *testing.T) {
 	t.Parallel()
 	m := New(Options{Version: "0.20260824.1"})
-	if got := m.Title(); got != "mink-lasso" {
+	if got := m.Title(); got != "Mink Lasso" {
 		t.Errorf("Title() = %q", got)
 	}
 	about := m.AboutText()
-	if !strings.Contains(about, "0.20260824.1") {
-		t.Errorf("AboutText() = %q, want version included", about)
+	if !strings.HasPrefix(about, "Mink Lasso 0.20260824.1\n") {
+		t.Errorf("AboutText() = %q, want application name and version included", about)
 	}
 	if !strings.Contains(about, "33 characters") {
 		t.Errorf("AboutText() = %q, want the file name limit mentioned", about)

@@ -89,7 +89,7 @@ jobs:
           go-version-file: go.mod
       - name: Check that the committed resource file is current
         run: make winres && git diff --exit-code -- cmd/mink-lasso
-      - run: make build
+      - run: make package
       - id: version
         # A bare assignment, unlike an argument to echo, fails the step if
         # make does.
@@ -99,7 +99,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mink-lasso
-          path: dist/mink-lasso.exe
+          path: dist/mink-lasso.zip
 
   release:
     name: release
@@ -107,8 +107,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
-      # This job publishes the exe the build job made rather than building
-      # it again: `make build` runs go-winres, and this job runs nothing but
+      # This job publishes the ZIP the build job made rather than building
+      # it again: `make package` runs go-winres, and this job runs nothing but
       # download-artifact and the gh CLI, so no build, lint, or test
       # dependency sees the elevated token.
       contents: write # creates the release and its tag
@@ -128,4 +128,4 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           gh release create "v0.$VERSION" --repo "$REPO" --target "$SHA" \
-            --title "$VERSION" --generate-notes dist/mink-lasso.exe
+            --title "$VERSION" --generate-notes dist/mink-lasso.zip

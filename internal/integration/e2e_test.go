@@ -112,7 +112,7 @@ func testE2E(t *testing.T, addr *net.UDPAddr, serial uint32) {
 		}
 
 		if t.Failed() {
-			t.Logf("mink-lasso.exe output:\n%s", out.String())
+			t.Logf("Mink Lasso.exe output:\n%s", out.String())
 		}
 	})
 
@@ -122,17 +122,17 @@ func testE2E(t *testing.T, addr *net.UDPAddr, serial uint32) {
 	checkLogContainsSent(t, logDir)
 
 	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("killing mink-lasso.exe: %v", err)
+		t.Fatalf("killing Mink Lasso.exe: %v", err)
 	}
 
 	waitErr := cmd.Wait()
 	closed = true
 
 	if cmd.ProcessState == nil {
-		t.Fatal("mink-lasso.exe did not exit after Kill")
+		t.Fatal("Mink Lasso.exe did not exit after Kill")
 	}
 
-	t.Logf("mink-lasso.exe exited: %v (wait error: %v)", cmd.ProcessState, waitErr)
+	t.Logf("Mink Lasso.exe exited: %v (wait error: %v)", cmd.ProcessState, waitErr)
 }
 
 // checkVersion runs the exe with -version and checks its stdout against the

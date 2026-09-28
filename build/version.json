@@ -9,12 +9,12 @@
         "info": {
           "0409": {
             "CompanyName": "Michael Shields",
-            "FileDescription": "mink-lasso",
+            "FileDescription": "Mink Lasso",
             "FileVersion": "@VERSION@",
             "InternalName": "mink-lasso",
             "LegalCopyright": "Copyright © 2026 Michael Shields",
-            "OriginalFilename": "mink-lasso.exe",
-            "ProductName": "mink-lasso",
+            "OriginalFilename": "Mink Lasso.exe",
+            "ProductName": "Mink Lasso",
             "ProductVersion": "@VERSION@"
           }
         }
