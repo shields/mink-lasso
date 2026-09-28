@@ -319,7 +319,7 @@ func TestSchedulerSilentAfterChunkIncompleteSuffixThenRetry(t *testing.T) {
 
 	ev := waitForEvent(t, events, isTransferEvent("D.NC", Failed))
 	te := asTransferEvent(t, ev)
-	want := "ERROR: No response from Masso — the file on the Masso may be incomplete; it will be resent"
+	want := "ERROR: No response from Masso — the file on the Masso may be missing or incomplete; it will be resent"
 	if te.Message != want {
 		t.Errorf("Failed message = %q, want %q", te.Message, want)
 	}

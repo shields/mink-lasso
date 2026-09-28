@@ -673,7 +673,7 @@ func TestFailureMessage(t *testing.T) {
 		{"no usb", masso.ErrNoUSB, false, "No USB flash drive connected to Masso"},
 		{
 			"no usb acked", masso.ErrNoUSB, true,
-			"No USB flash drive connected to Masso — the file on the Masso may be incomplete; it will be resent",
+			"No USB flash drive connected to Masso — the file on the Masso may be missing or incomplete; it will be resent",
 		},
 		{"no response", masso.ErrNoResponse, false, "ERROR: No response from Masso"},
 		{"canceled", masso.ErrCanceled, false, "File transfer canceled by user on Masso"},
@@ -684,7 +684,7 @@ func TestFailureMessage(t *testing.T) {
 		{"usb write", masso.ErrUSBWrite, false, "Unable to write file to USB"},
 		{
 			"usb write acked", masso.ErrUSBWrite, true,
-			"Unable to write file to USB — the file on the Masso may be incomplete; it will be resent",
+			"Unable to write file to USB — the file on the Masso may be missing or incomplete; it will be resent",
 		},
 		{"transfer", masso.ErrTransfer, false, "Error occurred while transferring file"},
 		{
@@ -697,7 +697,10 @@ func TestFailureMessage(t *testing.T) {
 			"No USB flash drive connected to Masso",
 		},
 		{"other", other, false, other.Error()},
-		{"other acked", other, true, other.Error() + " — the file on the Masso may be incomplete; it will be resent"},
+		{
+			"other acked", other, true,
+			other.Error() + " — the file on the Masso may be missing or incomplete; it will be resent",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

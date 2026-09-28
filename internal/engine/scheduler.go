@@ -833,5 +833,8 @@ func operatorText(err error) string {
 }
 
 // incompleteSuffix warns that a failure which happened after the start ACK
-// may have left a partial file on the controller's USB drive.
-const incompleteSuffix = " — the file on the Masso may be incomplete; it will be resent"
+// may have left the file on the controller's USB drive partial, or removed
+// it: the upload-abort notification Upload sends then deletes it, along with
+// any earlier version the start overwrote (docs/protocol.md §5.5), unless
+// the notification never reached the controller.
+const incompleteSuffix = " — the file on the Masso may be missing or incomplete; it will be resent"
