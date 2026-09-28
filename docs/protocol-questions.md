@@ -17,16 +17,15 @@ These need a real controller; `protocol.md` records each as unverified.
    Link never sends a chunk after one (§5.1). A start for another file while a
    transfer is open is accepted (§5.1), so removing the USB drive (`0xE9`) is
    the only known way to draw an error.
-4. **After `0x0C`.** The controller refuses chunks sent after `0x0C` but does
-   not always release the transfer, and sometimes keeps a 0-byte file and
-   sometimes none (§5.5). What decides each?
+4. **After `0x0C`.** `0x0C` ends a transfer's data and frees its name, though
+   the controller's screen keeps showing it (§5.5). Does it ever leave a partial
+   or 0-byte file behind?
 
 ## Open transfers
 
-13. **Closing an open transfer.** Is there any packet by which a client can end
-    a transfer the controller has open, short of sending every chunk? `0x0C`
-    does not reliably (§5.5). If not, how does a transfer that Masso Link gives
-    up on ever end, other than by hand on the controller?
+13. **Freeing a displaced transfer.** A transfer displaced by a start for
+    another file without `0x0C` first stays open, and its name draws `0xF7`,
+    until the controller restarts (§5.5). Is there any packet that frees it?
 
 ## Replies
 

@@ -632,35 +632,37 @@ condition.
 (probe) The controller does reply: each `0x0C` draws a 10-byte chunk ACK (type
 `0x0B`) with result `0x02` and bytes 6–9 spelling `USER`, so three packets draw
 three replies. A client that keeps using the same socket must read or discard
-them, or it will take them for the replies to its next requests. A chunk of the
-same transfer sent after `0x0C` draws that same `USER` ACK, so the controller no
-longer accepts the transfer's data.
+them, or it will take them for the replies to its next requests.
 
-It does not always let go of the transfer, though. In one run (two chunks, the
-second sent before the first, one accepted), the controller's screen went on
-showing "Receiving" with the file's name and the progress reached (98%) until
-the transfer was canceled by hand on the controller. In another (four chunks,
-two accepted, then one more after `0x0C`), nothing was showing afterward;
-whether the screen cleared on the signal, on the refused chunk, or by timing out
-was not observed. A transfer displaced by a start for another file (§5.1) is
-worse off: the controller never closes it. Its file stays on the drive at 0
-bytes, the controller refuses to delete it, and every later first start request
-for that name draws `0xF7`, with nothing on the screen, until the controller
-restarts; after a restart, a start for it drew `0x00` again. After a hand
-cancel, a start for the canceled file likewise drew `0x00` again. The status
-packet (§4) showed none of this (idle, empty file name).
+As far as the data goes, `0x0C` does end the transfer: a chunk of the same
+transfer sent afterward draws the same `USER` ACK, and a new start request for
+the same file draws `0x00`, whether sent at once or after a transfer of another
+file. The controller's screen does not follow. It went on showing "Receiving"
+with the file's name and the progress reached (66% with two of four chunks
+accepted, 98% with one of two) for over 15 minutes, until the transfer was
+canceled by hand or until a start request for any other file replaced it. The
+status packet (§4) shows none of this (idle, empty file name).
+
+A transfer that a start for another file displaces (§5.1) _without_ `0x0C` first
+is worse off: the controller never closes it, and `0x0C` sent afterward applies
+to the new transfer, not to it. Its file stays on the drive at 0 bytes, the
+controller refuses to delete it, and every later first start request for that
+name draws `0xF7`, with nothing on the screen, until the controller restarts;
+after a restart, a start for it drew `0x00` again.
 
 What the drive held afterward, read back on a PC:
 
 | Transfer                                                                       | On the drive                                                     |
 | ------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| started, no chunks, then `0x0C`                                                | a 0-byte file                                                    |
-| started, then displaced by a start for another file before any chunk           | a 0-byte file the controller refused to delete; see `0xF7` above |
+| started, displaced by a start for another file before any chunk                | a 0-byte file the controller refused to delete; see `0xF7` above |
 | started while another was open (the displacing one), no chunks, then `0x0C`    | no file                                                          |
 | started, two of four chunks accepted, then `0x0C` and one more (refused) chunk | no file                                                          |
+| started, no chunks, then `0x0C`                                                | a 0-byte file (see below)                                        |
 
-Still untested: whether any packet reliably releases a transfer from the client
-side, and what, among these cases, decides whether a partial file is kept.
+The last row comes from the first probe run, whose harness misread the
+controller's replies (above), so the order of events around it is less certain
+than in the others. Still untested: whether `0x0C` ever leaves a partial file
+behind, and whether anything short of a restart frees a displaced transfer.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 
