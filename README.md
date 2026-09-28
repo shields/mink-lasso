@@ -275,8 +275,9 @@ controller answers a status request with a status reply.
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Q7/Q8 | Captures the raw identity and config replies, for the operator to read off which bits carry what                                                                                                                                        | nothing                                                                                                                            |
 | Q2    | Resends an upload-start request and records the reply, then finishes one file continuing from chunk 0 and a second sending chunk 1 before chunk 0                                                                                       | `MLTESTQ2A.NC`, `MLTESTQ2B.NC`                                                                                                     |
-| Q3    | Sends a start while another transfer is open; if that second start is refused, sends a couple of its chunks and records their ACKs; then finishes both transfers                                                                        | `MLTESTQ3A<nnn>.NC` (stuck until the controller restarts), `MLTESTQ3B<nnn>.NC`                                                     |
+| Q3    | Sends a start while another transfer is open, then finishes both; with the USB drive removed, the first start is refused instead, and the probe sends that file's chunks and records their ACKs                                         | `MLTESTQ3A<nnn>.NC` (stuck until the controller restarts), `MLTESTQ3B<nnn>.NC`                                                     |
 | Q4    | Sends two chunks, the post-transfer signal, then the remaining chunks, which the controller refuses                                                                                                                                     | nothing, but "Receiving MLTESTQ4.NC" stays on the screen (at 66%) until the next probe starts a transfer or it is canceled by hand |
+| Q14   | Opens a transfer and sends one chunk, sends the same start again, then the post-transfer signal, then the start once more, and finishes whatever that opens                                                                             | `MLTESTQ14<nnn>.NC`, complete if the signal freed its name, otherwise stuck until the controller restarts                          |
 | Q5    | Uploads into a new, uniquely-named folder under `MLTEST\` that cannot already exist                                                                                                                                                     | an `MLTEST\MLTESTQ5-<timestamp>` folder, possibly containing `MLTESTQ5.NC`                                                         |
 | Q6    | Uploads into six folders under `MLTEST\` whose names probe edge cases (embedded/trailing spaces and periods, punctuation, a ~209-byte component)                                                                                        | six `MLTEST\MLTESTQ6*` folders, each possibly containing `MLTESTQ6.NC`                                                             |
 | Q12   | Opt-in (`MINK_LASSO_PROBE_LONG_NAMES=1`): hand-builds and sends upload-start requests for two names longer than the documented 15-character limit (16 and 33 characters), finishing the transfer only for a name the controller accepts | `MLTESTQ12-XXX.NC`, `MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC` — only with `MINK_LASSO_PROBE_LONG_NAMES=1`                                |
@@ -298,7 +299,9 @@ guaranteed:
   file it will not delete, and a start for this name draws `0xF7`, until the
   controller restarts ([docs/protocol.md](docs/protocol.md) §5.5). The probe
   logs that it could not finish it; that is expected. Delete it from a PC, or on
-  the controller after a restart.
+  the controller after a restart. With the USB drive removed, its start is
+  refused instead, and the probe sends its chunk to see whether the controller
+  stores it anyway (docs/protocol-questions.md Q3).
 - `MLTESTQ3B<nnn>.NC` — complete if the second start was accepted (question 3
   not exercised that run). If that start was refused instead, the probe sends
   chunks 0 and 1 to see whether the controller stores them anyway
@@ -308,6 +311,10 @@ guaranteed:
   the post-transfer signal and removes the partial file. Its screen keeps
   showing "Receiving MLTESTQ4.NC" at 66% until another transfer starts (Q5, in a
   full run) or it is canceled by hand (docs/protocol.md §5.5).
+- `MLTESTQ14<nnn>.NC` — `<nnn>` is three hex digits, new each run. Complete if
+  the post-transfer signal freed the transfer left open before it
+  (docs/protocol-questions.md Q14); otherwise that name may stay stuck, like
+  `MLTESTQ3A<nnn>.NC`, until the controller restarts.
 - the `MLTEST\MLTESTQ5-<timestamp>` folder, and `MLTESTQ5.NC` inside it —
   present or absent depending on whether the controller creates a missing
   directory (docs/protocol-questions.md Q5).

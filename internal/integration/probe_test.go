@@ -26,7 +26,7 @@ import (
 )
 
 // TestProbe runs the opt-in controller probes for docs/protocol-questions.md
-// (Q2-Q6, Q9, and the opt-in Q12, plus raw captures for Q7 and Q8): they log
+// (Q2-Q6, Q9, Q14, and the opt-in Q12, plus raw captures for Q7 and Q8): they log
 // what a real controller does in situations only real hardware can answer,
 // for an operator to paste back into that document. They assert nothing
 // about unknown controller behavior and fail only on a harness error or an
@@ -63,6 +63,9 @@ func TestProbe(t *testing.T) {
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q4_AfterTheSignal", func(t *testing.T) { probeQ4(t, h) })
 	h.requireStatusReply(t, "Q4_AfterTheSignal")
+	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
+	t.Run("Q14_SignalFreesOpenTransfer", func(t *testing.T) { probeQ14(t, h) })
+	h.requireStatusReply(t, "Q14_SignalFreesOpenTransfer")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q5_MissingDirectory", func(t *testing.T) { probeQ5(t, h) })
 	h.requireStatusReply(t, "Q5_MissingDirectory")
@@ -200,22 +203,21 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 // begins an upload, and stores chunks sent afterward, when it answers a
 // start request with an error result.
 //
-// docs/protocol.md names no automatable trigger for a start error other
-// than removing the USB drive by hand (0xE9), which this probe cannot do
-// for itself — the status packet (§4) carries nothing that would let it
-// detect the drive's removal, so it only logs that as a manual alternative
-// below. It also tries a start sent while another transfer is open: a
-// second, different upload-start request sent before the first is ever
-// chunked. docs/protocol.md §5.1 records that the controller accepts that
-// one, so unless the controller behaves differently this run, question 3 is
-// not exercised; either way, the probe then finishes the second transfer
-// and tries to finish the first, which shows whether the first is still
-// open after the second began.
+// The only known way to draw a start error is to remove the USB drive
+// (0xE9), which this probe cannot do for itself, so it tells the operator
+// how. Run that way, the first start is refused, and the probe sends that
+// file's chunks and logs their ACKs. With the drive in place, it instead
+// sends a second start, for another file, while the first transfer is
+// still open; docs/protocol.md §5.1 records that the controller accepts
+// that and displaces the first transfer, so question 3 goes unexercised
+// unless the controller behaves differently. The probe then finishes the
+// second transfer and tries the first, which the controller has ordinarily
+// left stuck (§5.5).
 func probeQ3(t *testing.T, h *probeHarness) {
 	t.Helper()
 
-	t.Logf("PROBE Q3: to observe the documented 0xE9 (no USB) error specifically, " +
-		"remove the USB drive from the controller and rerun `make probe`; " +
+	t.Logf("PROBE Q3: to observe a refused start (0xE9, no USB), " +
+		"remove the USB drive from the controller and rerun; " +
 		"this run proceeds regardless and logs whatever result the controller reports")
 
 	// A start sent while another transfer is open leaves the first one
@@ -236,7 +238,9 @@ func probeQ3(t *testing.T, h *probeHarness) {
 	logPacket(t, "PROBE Q3", "first start ACK ("+nameA+")", rawA)
 
 	if !trA.open {
-		t.Skip("PROBE Q3: first start not accepted; nothing is open to send a second start against")
+		probeQ3Refused(t, trA, nameA)
+
+		return
 	}
 
 	dataB := nChunkFileData("q3b", 2)
@@ -264,23 +268,32 @@ func probeQ3(t *testing.T, h *probeHarness) {
 		t.Log("PROBE Q3: a start sent while another transfer was open was accepted; question 3 was not exercised this run")
 		trB.finish(t, "PROBE Q3 "+nameB)
 	} else {
-		t.Log("PROBE Q3: a start sent while another transfer was open was not accepted; " +
-			"sending its chunks to see whether the controller stores them anyway")
-
-		for _, idx := range []uint32{0, 1} {
-			// Whether the controller ACKs a chunk for a refused start is
-			// exactly what this probe observes, so chunk logs a missing or
-			// odd-shaped reply rather than failing.
-			label := fmt.Sprintf("chunk %d ACK after the refused start", idx)
-			if ack, ok := trB.chunk(t, "PROBE Q3", label, idx); ok {
-				t.Logf("PROBE Q3: after chunk %d: accepted=%d/%d", idx, ack.Accepted, trB.total)
-			}
-		}
+		probeQ3Refused(t, trB, nameB)
 	}
 
 	// The first transfer's chunk ACK shows whether the controller still
 	// had it open after the second start.
 	trA.finish(t, "PROBE Q3 "+nameA)
+}
+
+// probeQ3Refused sends every chunk of tr, whose start the controller did
+// not accept, and logs each ACK: whether the controller stores chunks
+// after refusing their start is question 3 itself, so a missing or
+// odd-shaped reply is logged, not a failure.
+func probeQ3Refused(t *testing.T, tr *probeTransfer, name string) {
+	t.Helper()
+
+	t.Logf("PROBE Q3: the start for %s was not accepted; "+
+		"sending its chunks to see whether the controller stores them anyway", name)
+
+	for idx := range tr.total {
+		label := fmt.Sprintf("chunk %d ACK after the refused start (%s)", idx, name)
+		if ack, ok := tr.chunk(t, "PROBE Q3", label, idx); ok {
+			t.Logf("PROBE Q3: after chunk %d: result=0x%02X accepted=%d/%d", idx, ack.Result, ack.Accepted, tr.total)
+		}
+	}
+
+	t.Logf("PROBE Q3: check the drive for %s once it is back in the controller", name)
 }
 
 // probeQ4 addresses docs/protocol-questions.md Q4: whether the controller
@@ -316,6 +329,71 @@ func probeQ4(t *testing.T, h *probeHarness) {
 
 	// What the controller does with chunks sent after 0x0C is Q4 itself.
 	tr.finish(t, "PROBE Q4 after the signal")
+}
+
+// probeQ14 addresses docs/protocol-questions.md Q14: whether the
+// post-transfer signal frees a transfer the client left open without it,
+// such as one a client killed mid-upload leaves behind, so that a new
+// start for the same file draws 0x00 instead of 0xF7 (docs/protocol.md
+// §5.1, §5.5). It opens a two-chunk transfer, sends chunk 0, sends the
+// same start again as though from a fresh client, then the signal, then
+// the start once more, and finishes whatever transfer that opens.
+func probeQ14(t *testing.T, h *probeHarness) {
+	t.Helper()
+
+	// If the signal does not free the name, it stays stuck until the
+	// controller restarts, so each run uses a fresh one, as probeQ3 does.
+	name := fmt.Sprintf("MLTESTQ14%03X.NC", time.Now().UnixMilli()&0xFFF)
+	data := nChunkFileData("q14", 2)
+
+	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
+	if err != nil {
+		t.Fatalf("PROBE Q14: building start request: %v", err)
+	}
+
+	tr1, raw := h.startTransfer(t, startPkt, data)
+	logPacket(t, "PROBE Q14", "first start ACK ("+name+")", raw)
+
+	if !tr1.open {
+		t.Skip("PROBE Q14: first start not accepted; nothing is open to recover from")
+	}
+
+	tr1.chunk(t, "PROBE Q14", "chunk 0 ACK ("+name+")", 0)
+
+	if !tr1.open {
+		t.Skip("PROBE Q14: the transfer closed after chunk 0; nothing is open to recover from")
+	}
+
+	// The transfer is now open with data, as a client that died mid-upload
+	// would leave it. A fresh client's first start for the same file:
+	tr2, raw := h.startTransfer(t, startPkt, data)
+	logPacket(t, "PROBE Q14", "start ACK for the same file while its transfer is open ("+name+")", raw)
+
+	if tr2.open {
+		t.Log("PROBE Q14: the controller accepted a new start for the open file; question 14 was not exercised this run")
+		tr1.open = false // tr2 replaced it
+		tr2.finish(t, "PROBE Q14 "+name)
+
+		return
+	}
+
+	t.Log("PROBE Q14: sending the post-transfer signal (docs/protocol.md §5.5)")
+	tr1.abort(t)
+	tr1.open = false // the signal ends a transfer's data (docs/protocol.md §5.5)
+
+	tr3, raw := h.startTransfer(t, startPkt, data)
+	logPacket(t, "PROBE Q14", "start ACK after the signal ("+name+")", raw)
+
+	if !tr3.open {
+		t.Logf("PROBE Q14: the start after the signal was not accepted; the signal did not free %s, "+
+			"which may now stay stuck until the controller restarts", name)
+
+		return
+	}
+
+	if tr3.finish(t, "PROBE Q14 "+name) {
+		t.Logf("PROBE Q14: the signal freed %s; check that the drive holds it complete (%d bytes)", name, len(data))
+	}
 }
 
 // probeQ5 addresses docs/protocol-questions.md Q5: whether the controller

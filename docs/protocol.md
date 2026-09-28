@@ -643,6 +643,12 @@ accepted, 98% with one of two) for over 15 minutes, until the transfer was
 canceled by hand or until a start request for any other file replaced it. The
 status packet (§4) shows none of this (idle, empty file name).
 
+`0x0C` also frees a transfer that the client left open without it, as a client
+that dies partway through would. After a start and chunk 0 of a two-chunk file,
+the same start sent again drew `0xF7`; after `0x0C`, the next start drew `0x00`,
+and the whole file then went through from chunk 0. So a client whose first start
+request draws `0xF7` can send `0x0C` and start again.
+
 A transfer that a start for another file displaces (§5.1) _without_ `0x0C` first
 is worse off: the controller never closes it, and `0x0C` sent afterward applies
 to the new transfer, not to it. Its file stays on the drive at 0 bytes, the
