@@ -218,17 +218,18 @@ second is a failed discovery.
 
 ### Controller probes
 
-`make probe` runs `TestProbe`, an opt-in suite that records what a real
-controller does in the situations [docs/protocol.md](docs/protocol.md) marks
-unverified — the ones only real hardware can settle. It logs observations,
-prefixed `PROBE Q<n>:`, for a human to paste back into
-[docs/protocol-questions.md](docs/protocol-questions.md); it does not assert
-anything about that unknown behavior, and fails only on a harness error or an
-unsafe condition (the machine running, or the controller going unreachable).
-Like `make integration`, it skips unless `MINK_LASSO_SERIAL` is set, and skips
-while the machine is running unless `MINK_LASSO_ALLOW_RUNNING=1`; unlike
-`make integration`, it never runs as a side effect of the ordinary suite — it
-needs `MINK_LASSO_PROBE=1` too, which `make probe` sets for you:
+`make probe` runs `TestProbe`, an opt-in suite that repeats the experiments
+behind what [docs/protocol.md](docs/protocol.md) records from probes — the
+behavior only real hardware can show — so that a new firmware version can be
+checked against it. It logs what the controller does, prefixed `PROBE Q<n>:`
+after the question each probe was written to answer; it does not assert that
+behavior, since a new firmware version may change it, and fails only on a
+harness error or an unsafe condition (the machine running, or the controller
+going unreachable). Like `make integration`, it skips unless `MINK_LASSO_SERIAL`
+is set, and skips while the machine is running unless
+`MINK_LASSO_ALLOW_RUNNING=1`; unlike `make integration`, it never runs as a side
+effect of the ordinary suite — it needs `MINK_LASSO_PROBE=1` too, which
+`make probe` sets for you:
 
 ```text
 MINK_LASSO_SERIAL=G3-12345 make probe
@@ -276,7 +277,7 @@ controller answers a status request with a status reply.
 | Q3    | Sends a start while another transfer is open, then finishes both; with the USB drive removed, the first start is refused instead, and the probe sends that file's chunks and records their ACKs                    | `MLTESTQ3A<nnn>.NC` (stuck until the controller restarts), `MLTESTQ3B<nnn>.NC`                                                                                                                             |
 | Q4    | Starts `MLTESTQ4N.NC` and sends the post-transfer signal before any chunk; then sends two chunks of `MLTESTQ4.NC`, the signal, then the remaining chunks, which the controller refuses                             | whatever the signal leaves of `MLTESTQ4N.NC` and `MLTESTQ4.NC` (ordinarily nothing); "Receiving MLTESTQ4.NC" stays on the screen (at 66%) until the next probe starts a transfer or it is canceled by hand |
 | Q14   | Opens a transfer and sends one chunk, sends the same start again, then the post-transfer signal, then the start once more, and finishes whatever that opens                                                        | `MLTESTQ14<nnn>.NC`, complete if the signal freed its name, otherwise stuck until the controller restarts                                                                                                  |
-| Q13   | Uploads `MLTESTQ13.NC`, so nothing is open, then sends the post-transfer signal; watch the controller's screen for anything it shows                                                                               | `MLTESTQ13.NC`                                                                                                                                                                                             |
+| Q13   | Uploads `MLTESTQ13A.NC` and `MLTESTQ13B.NC`, waits, then sends the post-transfer signal, which deletes the most recent upload; watch the controller's screen, which should show nothing for it                     | `MLTESTQ13A.NC`                                                                                                                                                                                            |
 | Q5    | Uploads into a new, uniquely-named folder under `MLTEST\` that cannot already exist                                                                                                                                | an `MLTEST\MLTESTQ5-<timestamp>` folder, possibly containing `MLTESTQ5.NC`                                                                                                                                 |
 | Q6    | Uploads into six folders under `MLTEST\` whose names probe edge cases (embedded/trailing spaces and periods, punctuation, a ~209-byte component)                                                                   | six `MLTEST\MLTESTQ6*` folders, each possibly containing `MLTESTQ6.NC`                                                                                                                                     |
 | Q12   | Opt-in (`MINK_LASSO_PROBE_LONG_NAMES=1`): hand-builds and sends upload-start requests for a 34-character name, one over mink-lasso's limit, and a 33-character one, finishing each transfer the controller accepts | `MLTESTQ12-XXXXXXXXXXXXXXXXXXXXX.NC`, `MLTESTQ12-XXXXXXXXXXXXXXXXXXXX.NC` — only with `MINK_LASSO_PROBE_LONG_NAMES=1`                                                                                      |
@@ -300,30 +301,28 @@ guaranteed:
   logs that it could not finish it; that is expected. Delete it from a PC, or on
   the controller after a restart. With the USB drive removed, its start is
   refused instead, and the probe sends its chunk to see whether the controller
-  stores it anyway (docs/protocol-questions.md Q3).
+  stores it anyway (docs/protocol.md §5.1).
 - `MLTESTQ3B<nnn>.NC` — complete if the second start was accepted (question 3
   not exercised that run). If that start was refused instead, the probe sends
   chunks 0 and 1 to see whether the controller stores them anyway
-  (docs/protocol-questions.md Q3), so the file may be complete, partial, or
-  absent.
-- `MLTESTQ4N.NC` — started and then signaled before any chunk: absent, or
-  present with 0 bytes, which is what docs/protocol-questions.md Q4 asks.
+  (docs/protocol.md §5.1), so the file may be complete, partial, or absent.
+- `MLTESTQ4N.NC` — started and then signaled before any chunk: ordinarily absent
+  (docs/protocol.md §5.5).
 - `MLTESTQ4.NC` — ordinarily absent: the controller refuses chunks sent after
   the post-transfer signal and removes the partial file. Its screen keeps
   showing "Receiving MLTESTQ4.NC" at 66% until another transfer starts (Q5, in a
   full run) or it is canceled by hand (docs/protocol.md §5.5).
 - `MLTESTQ14<nnn>.NC` — `<nnn>` is three hex digits, new each run. Complete if
   the post-transfer signal freed the transfer left open before it
-  (docs/protocol-questions.md Q14); otherwise that name may stay stuck, like
+  (docs/protocol.md §5.5); otherwise that name may stay stuck, like
   `MLTESTQ3A<nnn>.NC`, until the controller restarts.
 - the `MLTEST\MLTESTQ5-<timestamp>` folder, and `MLTESTQ5.NC` inside it —
-  present or absent depending on whether the controller creates a missing
-  directory (docs/protocol-questions.md Q5).
+  ordinarily present: the controller creates a missing directory
+  (docs/protocol.md §5.1).
 - the six `MLTEST\MLTESTQ6*` folders below, and `MLTESTQ6.NC` inside whichever
-  of them were created — which of the six were created at all is exactly what
-  docs/protocol-questions.md Q6 asks. Three differ only by a trailing space or
-  period, easy to miss by eye in a file browser, so they are spelled out here
-  rather than left to the `*`:
+  of them were created — ordinarily all six (docs/protocol.md §5.1). Three
+  differ only by a trailing space or period, easy to miss by eye in a file
+  browser, so they are spelled out here rather than left to the `*`:
   - `MLTEST\MLTESTQ6 SPACE` (embedded space)
   - `MLTEST\MLTESTQ6.DOT` (embedded period)
   - `MLTEST\MLTESTQ6.` (trailing period)

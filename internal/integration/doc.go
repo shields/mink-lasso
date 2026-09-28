@@ -22,8 +22,8 @@
 // "Integration tests" section for how to run it.
 //
 // TestProbe is a separate, opt-in suite that records what a real controller
-// does in situations docs/protocol.md marks unverified, for an operator to
-// paste back into docs/protocol-questions.md; it additionally requires
+// does in the situations docs/protocol.md records from probes, so that a
+// new firmware version can be checked against it; it additionally requires
 // MINK_LASSO_PROBE=1, so it never runs as a side effect of the suite above.
 // See README.md's "Controller probes" section.
 //

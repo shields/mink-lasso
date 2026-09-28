@@ -84,7 +84,7 @@ sim:
 integration: build
 	MINK_LASSO_EXE=$(abspath $(EXE)) go test -tags integration -count=1 -v -timeout 15m ./internal/integration/...
 
-# Runs the opt-in controller probes for docs/protocol-questions.md; every
+# Runs the opt-in controller probes that check docs/protocol.md; every
 # probe skips unless MINK_LASSO_SERIAL is set. See README.md's "Controller
 # probes" section.
 probe:

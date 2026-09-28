@@ -25,10 +25,11 @@ import (
 	"msrl.dev/mink-lasso/internal/masso"
 )
 
-// TestProbe runs the opt-in controller probes for docs/protocol-questions.md
-// (Q2-Q6, Q9, Q14, and the opt-in Q12, plus raw captures for Q7 and Q8): they log
-// what a real controller does in situations only real hardware can answer,
-// for an operator to paste back into that document. They assert nothing
+// TestProbe runs the opt-in controller probes (Q2-Q6, Q9, Q13, Q14, and the
+// opt-in Q12, plus raw captures for Q7 and Q8, named for the questions they
+// were written to answer): they log what a real controller does in the
+// situations docs/protocol.md records from probes, so that a new firmware
+// version can be checked against it. They assert nothing
 // about unknown controller behavior and fail only on a harness error or an
 // unsafe condition (see README.md's "Controller probes" section); a
 // controller talks to one client at a time, so nothing here may run with
@@ -84,10 +85,10 @@ func TestProbe(t *testing.T) {
 	probeFinalStatus(t, h)
 }
 
-// probeQ7Q8 addresses docs/protocol-questions.md Q7 (which 16 bits of the
-// config reply carry the serial, bytes 5-6 per docs/protocol.md §3.2) and Q8
-// (the meaning of identity bytes 9-12, §3.1) by logging both replies raw,
-// alongside the configured serial for comparison.
+// probeQ7Q8 records which 16 bits of the serial the config reply carries
+// (bytes 5-6, docs/protocol.md §3.2) and the identity reply's bytes 9-12,
+// whose meaning is unknown (§3.1), by logging both replies raw, alongside
+// the configured serial for comparison.
 func probeQ7Q8(t *testing.T, h *probeHarness, serial uint32) {
 	t.Helper()
 
@@ -110,9 +111,10 @@ func probeQ7Q8(t *testing.T, h *probeHarness, serial uint32) {
 	}
 }
 
-// probeQ2 addresses docs/protocol-questions.md Q2 (probeQ2ContinueFromChunk0)
-// and, beyond Q2 itself, also observes out-of-order chunk delivery on the
-// same kind of resent-start transfer (probeQ2ChunkOutOfOrder).
+// probeQ2 records how the controller answers a resent start and where the
+// transfer continues afterward (probeQ2ContinueFromChunk0), and what it does
+// with chunks delivered out of order (probeQ2ChunkOutOfOrder)
+// (docs/protocol.md §5.1, §5.2).
 func probeQ2(t *testing.T, h *probeHarness) {
 	t.Helper()
 
@@ -157,8 +159,7 @@ func probeQ2ContinueFromChunk0(t *testing.T, h *probeHarness) {
 	tr.finish(t, "PROBE Q2 "+name)
 }
 
-// probeQ2ChunkOutOfOrder is not itself tied to a numbered question in
-// docs/protocol-questions.md. It reuses probeQ2ContinueFromChunk0's
+// probeQ2ChunkOutOfOrder reuses probeQ2ContinueFromChunk0's
 // start-then-resend setup to observe what the controller does when chunk 1
 // arrives before chunk 0, then finishes the transfer in order.
 func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
@@ -202,9 +203,10 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 	tr.finish(t, "PROBE Q2 "+name)
 }
 
-// probeQ3 addresses docs/protocol-questions.md Q3: whether the controller
-// begins an upload, and stores chunks sent afterward, when it answers a
-// start request with an error result.
+// probeQ3 records whether the controller begins an upload, and stores
+// chunks sent afterward, when it answers a start request with an error
+// result, and what a start for another file does to an open transfer
+// (docs/protocol.md §5.1, §5.5).
 //
 // The only known way to draw a start error is to remove the USB drive
 // (0xE9), which this probe cannot do for itself, so it tells the operator
@@ -299,8 +301,9 @@ func probeQ3Refused(t *testing.T, tr *probeTransfer, name string) {
 	t.Logf("PROBE Q3: check the drive for %s once it is back in the controller", name)
 }
 
-// probeQ4 addresses docs/protocol-questions.md Q4: whether the
-// post-transfer signal ever leaves a partial or 0-byte file behind. It first
+// probeQ4 records what the post-transfer signal does to a transfer in
+// progress, and whether it leaves a partial or 0-byte file behind
+// (docs/protocol.md §5.5). It first
 // starts MLTESTQ4N.NC and sends the signal before any chunk, then starts
 // MLTESTQ4.NC, sends two chunks, the signal, and tries to finish it,
 // logging each ACK. What each leaves on the drive answers the question.
@@ -337,8 +340,8 @@ func probeQ4(t *testing.T, h *probeHarness) {
 	tr.finish(t, "PROBE Q4 after the signal")
 }
 
-// probeQ14 addresses docs/protocol-questions.md Q14: whether the
-// post-transfer signal frees a transfer the client left open without it,
+// probeQ14 records whether the post-transfer signal frees a transfer the
+// client left open without it (docs/protocol.md §5.5),
 // such as one a client killed mid-upload leaves behind, so that a new
 // start for the same file draws 0x00 instead of 0xF7 (docs/protocol.md
 // §5.1, §5.5). It opens a two-chunk transfer, sends chunk 0, sends the
@@ -431,38 +434,48 @@ func probeQ4NoChunks(t *testing.T, h *probeHarness) {
 	t.Logf("PROBE Q4: check the drive for %s: absent, or present with 0 bytes", name)
 }
 
-// probeQ13 serves docs/protocol-questions.md Q13 indirectly: rather than
-// free a displaced transfer, a client can keep one from arising by sending
-// the post-transfer signal when it connects, canceling any transfer an
-// earlier run left open before it starts another file. That is safe only if
-// the signal is harmless with nothing open, which this checks: it completes
-// a one-chunk upload, so nothing is open, then sends the signal and logs
-// the replies. The operator watches the controller's screen for anything
-// the signal puts there.
+// probeQ13 records what the post-transfer signal does once every transfer
+// has completed (docs/protocol.md §5.5). It completes two uploads,
+// MLTESTQ13A.NC then MLTESTQ13B.NC, waits long enough for the upload's own
+// screen to clear, then sends the signal and logs the replies. The signal
+// deletes the most recent transfer's file even though it completed, so the
+// drive should then hold only MLTESTQ13A.NC; this is why a client must not
+// send the signal when it connects, to end whatever an earlier run left
+// open. The operator also watches the controller's screen, which should
+// show nothing for it.
 func probeQ13(t *testing.T, h *probeHarness) {
 	t.Helper()
 
-	const name = "MLTESTQ13.NC"
+	for _, name := range []string{"MLTESTQ13A.NC", "MLTESTQ13B.NC"} {
+		data := nChunkFileData(strings.ToLower(name[6:10]), 1)
 
-	data := nChunkFileData("q13", 1)
+		startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
+		if err != nil {
+			t.Fatalf("PROBE Q13: building start request for %s: %v", name, err)
+		}
 
-	startPkt, err := masso.UploadStart(uint32(len(data)&0xFFFFFFFF), "", name)
-	if err != nil {
-		t.Fatalf("PROBE Q13: building start request: %v", err)
+		tr, raw := h.startTransfer(t, startPkt, data)
+		logPacket(t, "PROBE Q13", "start ACK ("+name+")", raw)
+
+		if !tr.finish(t, "PROBE Q13 "+name) {
+			t.Skipf("PROBE Q13: the upload of %s did not complete; not sending the signal", name)
+		}
 	}
 
-	tr, raw := h.startTransfer(t, startPkt, data)
-	logPacket(t, "PROBE Q13", "start ACK ("+name+")", raw)
+	// The upload shows its own screen briefly; a pause keeps anything the
+	// signal shows from being mistaken for it.
+	const pause = 5 * time.Second
 
-	if !tr.finish(t, "PROBE Q13 "+name) {
-		t.Skip("PROBE Q13: the upload did not complete, so something may still be open; not sending the signal")
-	}
-
-	t.Log("PROBE Q13: nothing is open; sending the post-transfer signal now: watch the controller's screen")
+	t.Logf("PROBE Q13: both uploads complete; waiting %s, then sending the post-transfer signal", pause)
+	time.Sleep(pause)
+	t.Logf("PROBE Q13: sending the post-transfer signal at %s: watch the controller's screen",
+		time.Now().Format(time.TimeOnly))
 	h.sendAbortSignal(t)
+	t.Log("PROBE Q13: check the drive for MLTESTQ13A.NC and MLTESTQ13B.NC; " +
+		"if only A is there, the signal deleted the most recent transfer's file, as docs/protocol.md §5.5 records")
 }
 
-// probeQ5 addresses docs/protocol-questions.md Q5: whether the controller
+// probeQ5 records whether the controller
 // creates a directory named in the start packet's path field that does not
 // yet exist, and which result the start ACK or first chunk ACK carries if
 // not.
@@ -503,12 +516,12 @@ func probeQ5(t *testing.T, h *probeHarness) {
 // probeQ6DirEntry is one row of probeQ6's directory-name table: a folder
 // name component under MLTEST\ that passes masso.ValidateUploadDir but
 // probes an edge of what a folder name may contain or how long one
-// component may be (docs/protocol-questions.md Q6).
+// component may be (docs/protocol.md §5.1).
 type probeQ6DirEntry struct {
 	component, note string
 }
 
-// probeQ6 addresses docs/protocol-questions.md Q6: which bytes a directory
+// probeQ6 records which bytes a directory
 // name in the path field may contain, and whether one component has a
 // length limit narrower than the 255-byte path field as a whole.
 func probeQ6(t *testing.T, h *probeHarness) {
@@ -639,8 +652,8 @@ type probeQ12Result struct {
 	thirtyThreeAccepted, thirtyThreeComplete bool
 }
 
-// probeQ12 addresses docs/protocol-questions.md Q12, the longest file name
-// the controller accepts: it has accepted 33 characters, and Masso Link
+// probeQ12 tries file names beyond mink-lasso's own limit, to see how far
+// the controller goes: it has accepted 33 characters, and Masso Link
 // itself checks nothing narrower than 255 (docs/protocol.md §5). It uploads
 // two comments-only files, one whose name is one character over mink-lasso's
 // own limit (masso.MaxFileName+1, 34), which masso.UploadStart refuses to
@@ -671,7 +684,7 @@ func probeQ12(t *testing.T, h *probeHarness) probeQ12Result {
 // hand — to appear on the controller.
 const probeQ9StatusPollTimeout = 3 * time.Minute
 
-// probeQ9 addresses docs/protocol-questions.md Q9: whether the status
+// probeQ9 records whether the status
 // packet's current-file-name field NUL-terminates at exactly 33 characters,
 // or the name runs into the reserved area beyond it (docs/protocol.md §4).
 //
