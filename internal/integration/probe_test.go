@@ -48,20 +48,30 @@ func TestProbe(t *testing.T) {
 	// subtest order or a shared naming convention.
 	var q12 probeQ12Result
 
+	// Each probe is followed by a status request that must draw a status
+	// reply (requireStatusReply), so a controller left mid-transfer stops the
+	// run before later probes misread their replies.
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q7Q8_RawCaptures", func(t *testing.T) { probeQ7Q8(t, h, serial) })
+	h.requireStatusReply(t, "Q7Q8_RawCaptures")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q2_ResentStart", func(t *testing.T) { probeQ2(t, h) })
+	h.requireStatusReply(t, "Q2_ResentStart")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q3_StartWhileOpen", func(t *testing.T) { probeQ3(t, h) })
+	h.requireStatusReply(t, "Q3_StartWhileOpen")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q4_AfterTheSignal", func(t *testing.T) { probeQ4(t, h) })
+	h.requireStatusReply(t, "Q4_AfterTheSignal")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q5_MissingDirectory", func(t *testing.T) { probeQ5(t, h) })
+	h.requireStatusReply(t, "Q5_MissingDirectory")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q6_DirectoryNames", func(t *testing.T) { probeQ6(t, h) })
+	h.requireStatusReply(t, "Q6_DirectoryNames")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q12_LongFileNames", func(t *testing.T) { q12 = probeQ12(t, h) })
+	h.requireStatusReply(t, "Q12_LongFileNames")
 	//nolint:paralleltest // sequential by design; see TestProbe's doc comment.
 	t.Run("Q9_ThirtyThreeCharacterName", func(t *testing.T) { probeQ9(t, h, q12) })
 
@@ -128,6 +138,7 @@ func probeQ2ContinueFromChunk0(t *testing.T, h *probeHarness) {
 		t.Skipf("PROBE Q2: first start refused (0x%02X); cannot test a resend", ack.Result)
 	}
 
+	h.drain(t)
 	h.send(t, startPkt) // the deliberate resend under test: sent exactly once, not via roundTrip's retries
 
 	// Silence here is itself an answer to Q2 (does the controller reply to a
@@ -146,7 +157,7 @@ func probeQ2ContinueFromChunk0(t *testing.T, h *probeHarness) {
 		return
 	}
 
-	tr.finishOrAbort(t, "PROBE Q2 "+name, cack.Accepted, total)
+	tr.finishOrAbort(t, "PROBE Q2 "+name, cack, total)
 }
 
 // probeQ2ChunkOutOfOrder is not itself tied to a numbered question in
@@ -178,6 +189,7 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 		t.Skipf("PROBE Q2: first start refused (0x%02X); cannot test the out-of-order case", ack.Result)
 	}
 
+	h.drain(t)
 	h.send(t, startPkt) // the deliberate resend under test
 
 	// As in probeQ2ContinueFromChunk0, no reply here is a legitimate
@@ -200,7 +212,7 @@ func probeQ2ChunkOutOfOrder(t *testing.T, h *probeHarness) {
 	}
 
 	t.Logf("PROBE Q2: after chunk 0: accepted=%d/%d", ack0.Accepted, total)
-	tr.finishOrAbort(t, "PROBE Q2 "+name, ack0.Accepted, total)
+	tr.finishOrAbort(t, "PROBE Q2 "+name, ack0, total)
 }
 
 // probeQ3 addresses docs/protocol-questions.md Q3: whether the controller
@@ -390,7 +402,7 @@ func probeQ5(t *testing.T, h *probeHarness) {
 		"check the controller's file browser for %s\\MLTESTQ5.NC",
 		ack.Result, cack.Result, cack.Accepted, total, dir)
 
-	tr.finishOrAbort(t, "PROBE Q5 "+dir, cack.Accepted, total)
+	tr.finishOrAbort(t, "PROBE Q5 "+dir, cack, total)
 }
 
 // probeQ6DirEntry is one row of probeQ6's directory-name table: a folder
@@ -456,7 +468,7 @@ func probeQ6(t *testing.T, h *probeHarness) {
 			continue
 		}
 
-		tr.finishOrAbort(t, fmt.Sprintf("PROBE Q6 %q", dir), cack.Accepted, total)
+		tr.finishOrAbort(t, fmt.Sprintf("PROBE Q6 %q", dir), cack, total)
 	}
 }
 
@@ -541,9 +553,7 @@ func probeQ12Upload(t *testing.T, h *probeHarness, name string) (accepted, compl
 		return true, false
 	}
 
-	tr.finishOrAbort(t, "PROBE Q12 "+name, cack.Accepted, total)
-
-	return true, cack.Accepted >= total
+	return true, tr.finishOrAbort(t, "PROBE Q12 "+name, cack, total)
 }
 
 // probeQ12Result is what probeQ12 hands to probeQ9: an explicit record of
@@ -691,19 +701,7 @@ func probeQ9PollStatus(t *testing.T, h *probeHarness, want string, timeout time.
 func probeFinalStatus(t *testing.T, h *probeHarness) {
 	t.Helper()
 
-	raw := h.roundTrip(t, masso.Keepalive(time.Now()))
-
-	logPacket(t, "PROBE", "final status", raw)
-
-	reply, err := masso.DecodeReply(raw)
-	if err != nil {
-		t.Fatalf("PROBE: decoding final status: %v", err)
-	}
-
-	st, ok := reply.(masso.Status)
-	if !ok {
-		t.Fatalf("PROBE: final reply was %T, not a status packet", reply)
-	}
+	st := h.requireStatusReply(t, "the last probe")
 
 	if (st.Running || st.WaitingForOperator) && !allowRunning() {
 		t.Errorf("PROBE: controller is not idle at the end of the run (running=%v waitingForOperator=%v)",

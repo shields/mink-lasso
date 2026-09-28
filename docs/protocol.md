@@ -39,6 +39,10 @@ by one or more of:
   v2.15 specifically: the "skipped" wording folded into the transfer-status
   caption (§5.1) appears in the v2.15 binary's string table and not in v2.12's
   or v2.14's.
+- **Hardware probes (2026-09)** — mink-lasso's own `make probe` (README's
+  "Controller probes"), run against a 5-Axis controller on firmware v5.13. These
+  record what the controller did with packets mink-lasso sent; no Masso Link
+  material is involved. Statements that rest on them say "(probe)."
 
 > This is unofficial documentation. It is not affiliated with or endorsed by
 > Masso. Uploading a file only writes it to the controller's USB drive; it does
@@ -173,7 +177,9 @@ Reply (46 bytes): identity / version.
   against the number the operator typed when connecting by serial number (§7).
 - bytes 9–12: a second 32-bit field (u32 LE). Masso Link reads it, but no use
   for it was found; its meaning is unknown. On the captured firmware byte 12 is
-  `0x40`.
+  `0x40`. (probe) A second v5.13 controller sent `0A D7 03 40`, again ending in
+  `0x40`; read as a little-endian IEEE 754 single, that is 2.06. Whether it is
+  meant as a number at all is unverified.
 - bytes 13–41: the ASCII, NUL-terminated **version string** (e.g.
   `5-Axis v5.13`). Masso Link reads it from this fixed offset and never past
   byte 41.
@@ -194,8 +200,9 @@ these bytes** — zeros work equally well; Masso Link sends the wall clock.
 ```
 
 Reply (10 bytes): `[crc] 03 00 03 | SS SS | 00 00 0A` — bytes 5–6 echo the
-serial. Which 16 bits of the 32-bit serial (§3.1) these are, and whether Masso
-Link compares them against anything, is not yet established.
+serial's low 16 bits (§3.1), little-endian (probe: a controller with serial
+0x000048F7 replied `F7 48`). Whether Masso Link compares them against anything
+is not yet established.
 
 ### 3.3 Keepalive / status — `0x01`
 
@@ -445,11 +452,19 @@ no way to ask to resume anywhere but chunk 0. On any other result — anything b
 directly from recording the error to ending the transfer (§5.5), with no window
 in which a chunk could go out first.
 
-Whether real firmware actually answers a resent start request with `0xF7`, and
-whether a controller that does so then expects the transfer to begin at chunk 0,
-remains unverified against real hardware: the client binaries show what Masso
-Link itself sends and does in each case, not what a controller sends it under or
-does in response. Likewise unverified: whether a controller that answers a start
+(probe) Real firmware does answer a resent start request with `0xF7`, and then
+accepts chunk 0 as the first chunk (accepted count 1), so beginning again at
+chunk 0 is what the controller expects. `0xF7` is not tied to retransmission as
+such: a first start request for a file name also drew `0xF7` while an earlier,
+never-completed transfer had left that name open (§5.5), which suggests it means
+"a transfer of this file is already open." A start for a _different_ file, sent
+while another transfer was open, drew `0x00`; which of the two transfers the
+controller then continues is unverified.
+
+Bytes 6–9 of a start ACK carry no information: they are whatever the
+controller's previous reply left at those offsets (probe: `00 FF 97 01`, bytes
+6–9 of the status reply before it, and `55 53 45 52`, `USER`, after a canceled
+chunk ACK). Likewise unverified: whether a controller that answers a start
 request with an error result has already begun the upload and stores any chunks
 sent afterward — a question real firmware alone can settle, since Masso Link
 itself never sends a chunk in that situation for one to react to.
@@ -478,6 +493,11 @@ decodes its accepted-chunk count but abandons the transfer immediately afterward
 without folding that count into the running total it had been tracking (v2.15) —
 an error result's accepted count has no effect on the progress already reported
 and is not used for anything beyond ending the transfer.
+
+(probe) The controller stores chunks strictly in order. A chunk sent ahead of
+its turn (chunk 1 before chunk 0) draws result `0x00` with the accepted count
+unchanged, and is discarded: after chunk 0 arrives the count is 1, and the
+controller goes on waiting for chunk 1.
 
 ### 5.3 Sequence and timing
 
@@ -599,14 +619,21 @@ difference in count or spacing by cause.
 
 Masso Link's own part ends with the third packet: it does not wait for a reply
 before moving on, consistent with no receiver ever checking an incoming packet's
-type against `0x0C` in the first place. Its effect on the controller is unknown;
-the most plausible reading, since it names no file or path, is an abort/cleanup
-notification. mink-lasso sends it under the same condition. Whether the
-controller needs it has not been tested, and neither has what the controller
-does with the partial file it was writing — keep it, delete it, or something
-else — or what accepted count, if any, it reports for chunks sent to it after
-this notification; these are controller-side questions the client binaries
-cannot settle.
+type against `0x0C` in the first place. mink-lasso sends it under the same
+condition.
+
+(probe) The controller does reply: each `0x0C` draws a 10-byte chunk ACK (type
+`0x0B`) with result `0x02` and bytes 6–9 spelling `USER`, so three packets draw
+three replies. A client that keeps using the same socket must read or discard
+them, or it will take them for the replies to its next requests. Despite the
+`USER` result, `0x0C` does **not** end the transfer on the controller: its
+screen went on showing "Receiving" with the file's name and the progress reached
+(98% after one of two chunks) until the transfer was canceled by hand on the
+controller, and a later start request for the same file drew `0xF7` (§5.1). The
+status packet (§4) showed no sign of the open transfer (idle, empty file name).
+Still untested: whether any packet closes an open transfer from the client side,
+what the controller does with the partial file when the transfer is canceled by
+hand, and whether it stores chunks sent after `0x0C`.
 
 ### 5.6 Multiple files and folder drops (v2.15)
 

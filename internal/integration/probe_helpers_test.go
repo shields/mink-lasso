@@ -39,6 +39,15 @@ const (
 
 	// probeWriteDeadline bounds a single send on the probe socket.
 	probeWriteDeadline = 2 * time.Second
+
+	// probeDrainWait is how long drain waits for one more stray datagram
+	// before deciding the socket is quiet.
+	probeDrainWait = 50 * time.Millisecond
+
+	// probeSignalReplyWait is how long sendAbortSignal listens for replies
+	// to the post-transfer signal, which docs/protocol.md §5.5 says draws
+	// none.
+	probeSignalReplyWait = 500 * time.Millisecond
 )
 
 // probeHarness owns a UDP socket dedicated to the probe subtests: unlike
@@ -135,7 +144,15 @@ func (h *probeHarness) send(t *testing.T, pkt []byte) {
 func (h *probeHarness) recv(t *testing.T) ([]byte, bool) {
 	t.Helper()
 
-	deadline := time.Now().Add(probeReplyWait)
+	return h.recvWithin(t, probeReplyWait)
+}
+
+// recvWithin behaves like recv but waits up to wait instead of
+// probeReplyWait.
+func (h *probeHarness) recvWithin(t *testing.T, wait time.Duration) ([]byte, bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(wait)
 	buf := make([]byte, masso.MaxPacket)
 
 	for {
@@ -176,6 +193,8 @@ func (h *probeHarness) recv(t *testing.T) ([]byte, bool) {
 func (h *probeHarness) tryRoundTrip(t *testing.T, pkt []byte) ([]byte, bool) {
 	t.Helper()
 
+	h.drain(t)
+
 	for range probeAttempts {
 		h.send(t, pkt)
 		if raw, ok := h.recv(t); ok {
@@ -204,9 +223,29 @@ func (h *probeHarness) roundTrip(t *testing.T, pkt []byte) []byte {
 	return nil
 }
 
+// drain reads and logs every datagram already waiting on the socket, or
+// arriving within probeDrainWait of the last one, so that a late or
+// unsolicited reply is recorded as such instead of being taken for the
+// reply to the next request. Left unread, one stray reply shifts every later
+// exchange by one and makes each probe after it misread its results.
+func (h *probeHarness) drain(t *testing.T) {
+	t.Helper()
+
+	for {
+		raw, ok := h.recvWithin(t, probeDrainWait)
+		if !ok {
+			return
+		}
+
+		logPacket(t, "PROBE", "unsolicited reply, not matched to any request", raw)
+	}
+}
+
 // sendAbortSignal sends the post-transfer notification three times, 20ms
-// apart, matching v2.15's own cadence (docs/protocol.md §5.5); it draws no
-// reply.
+// apart, matching v2.15's own cadence (docs/protocol.md §5.5), then logs
+// every reply that arrives within probeSignalReplyWait. §5.5 says the
+// signal draws none, so any reply is an observation; collecting them here
+// also keeps them from being read as the reply to the next request.
 func (h *probeHarness) sendAbortSignal(t *testing.T) {
 	t.Helper()
 
@@ -215,6 +254,8 @@ func (h *probeHarness) sendAbortSignal(t *testing.T) {
 		spacing = 20 * time.Millisecond
 	)
 
+	h.drain(t)
+
 	for i := range times {
 		if i > 0 {
 			time.Sleep(spacing)
@@ -222,6 +263,48 @@ func (h *probeHarness) sendAbortSignal(t *testing.T) {
 
 		h.send(t, masso.UploadAbort())
 	}
+
+	replies := 0
+	for {
+		raw, ok := h.recvWithin(t, probeSignalReplyWait)
+		if !ok {
+			break
+		}
+
+		replies++
+		logPacket(t, "PROBE", fmt.Sprintf("reply %d to the post-transfer signal (sent %d times)", replies, times), raw)
+	}
+
+	if replies == 0 {
+		t.Logf("PROBE: no reply to the post-transfer signal within %s", probeSignalReplyWait)
+	}
+}
+
+// requireStatusReply sends one status request and fails the test unless a
+// status reply comes back, returning it. TestProbe calls it between probes:
+// a controller left mid-transfer answers with something else, and every
+// probe after that point would misread its results, so stopping is the only
+// safe course.
+func (h *probeHarness) requireStatusReply(t *testing.T, after string) masso.Status {
+	t.Helper()
+
+	raw := h.roundTrip(t, masso.Keepalive(time.Now()))
+	logPacket(t, "PROBE", "status after "+after, raw)
+
+	reply, err := masso.DecodeReply(raw)
+	if err != nil {
+		t.Fatalf("PROBE: decoding the status reply after %s: %v", after, err)
+	}
+
+	st, ok := reply.(masso.Status)
+	if !ok {
+		t.Fatalf("PROBE: after %s, a status request drew %s instead of a status reply; "+
+			"the controller may be stuck mid-transfer. Check its screen for a transfer "+
+			"in progress, cancel it, and rerun; stopping so later probes do not misread their replies",
+			after, describeReply(reply))
+	}
+
+	return st
 }
 
 // probeTransfer tracks one upload-start request from the moment it is
@@ -302,21 +385,26 @@ func (tr *probeTransfer) abort(t *testing.T) {
 	tr.h.sendAbortSignal(t)
 }
 
-// finishOrAbort logs whether tr's transfer completed (accepted >= total
-// chunks) and, if not, aborts it so nothing is left open on the controller
-// (docs/protocol.md §5.5).
-func (tr *probeTransfer) finishOrAbort(t *testing.T, tag string, accepted, total uint32) {
+// finishOrAbort logs whether tr's transfer completed (last, the most recent
+// chunk ACK, reports success and accepted >= total chunks) and, if not,
+// aborts it so nothing is left open on the controller (docs/protocol.md
+// §5.5). It reports whether the transfer completed. An error ACK's accepted
+// count never counts as completion, per §5.2.
+func (tr *probeTransfer) finishOrAbort(t *testing.T, tag string, last masso.ChunkAck, total uint32) bool {
 	t.Helper()
 
-	if accepted >= total {
-		t.Logf("%s: transfer complete (%d/%d chunks accepted); no signal needed", tag, accepted, total)
+	if last.Result == masso.ChunkOK && last.Accepted >= total {
+		t.Logf("%s: transfer complete (%d/%d chunks accepted); no signal needed", tag, last.Accepted, total)
 		tr.closed = true
 
-		return
+		return true
 	}
 
-	t.Logf("%s: transfer incomplete (%d/%d chunks accepted); sending the post-transfer signal", tag, accepted, total)
+	t.Logf("%s: transfer incomplete (result=0x%02X, %d/%d chunks accepted); sending the post-transfer signal",
+		tag, last.Result, last.Accepted, total)
 	tr.abort(t)
+
+	return false
 }
 
 // logPacket logs a reply both decoded and as hex, prefixed with tag and

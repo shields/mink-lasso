@@ -261,10 +261,13 @@ malformed reaching it.
 Each probe sends only well-formed packets of documented types, and every file
 and folder name it uses starts with `MLTEST`, so it is easy to find and delete
 from the USB drive afterward. Every probe that opens a transfer (a start request
-the controller acknowledges) closes it again — either by finishing normally or
-by sending the post-transfer signal — before it returns, even if it fails or is
-skipped partway through; nothing here relies on a probe reaching its own final
-line to avoid leaving a transfer open on the controller.
+the controller acknowledges) either finishes it or sends the post-transfer
+signal before it returns, even if it fails or is skipped partway through. The
+signal does not close the transfer on the controller, though
+([docs/protocol.md](docs/protocol.md) §5.5): one that does not finish stays
+open, showing "Receiving" on the controller's screen, until it is canceled there
+by hand. The status packet does not show it, so watch the screen and cancel any
+such transfer before rerunning.
 
 | Probe | What it does                                                                                                                                                                                                                            | Leaves behind                                                                                       |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
