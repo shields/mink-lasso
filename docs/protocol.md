@@ -258,11 +258,8 @@ Offsets are from the start of the datagram.
 | **17–49** |  ≤33 | **current file name** | NUL-terminated ASCII, max 33 characters (empty when idle); Masso Link never reads past byte 49                                                                                                                   |
 |     …–269 |    — | reserved              | `0x00` when idle; holds additional run-time data on a busy machine                                                                                                                                               |
 
-Whether byte 50 holds the terminating NUL when the file name is exactly 33
-characters long, or the name instead runs to the end of the field with no
-terminator there, is not established: no capture with a name of that exact
-length was available, and Masso Link's own indifference to anything past byte 49
-(above) does not by itself say which the controller does.
+(probe) With a file name of exactly 33 characters loaded, byte 50 holds the
+terminating NUL, and bytes 51–57 were zero on an idle machine.
 
 The app renders the machine-state text and the alarm banners it shows —
 `Machining`, `Machine Stopped`, `Change Tool`, `SPINDLE ALARM`,
@@ -286,8 +283,12 @@ for a folder drop (v2.15; §5.1). The file is stored only; it is not executed.
 **Filename rules** (enforced by the app, not the controller):
 
 - ≤ **15 characters**, ASCII. No length check on the file name was found in any
-  Masso Link binary, v2.12 through v2.15; the limit is a documented assumption,
-  not yet tested against real hardware with a longer name.
+  Masso Link binary, v2.12 through v2.15; the limit is a documented assumption.
+  (probe) The controller does not enforce it: it accepted and stored files with
+  16- and 33-character names, loaded the 33-character one by its full name, and
+  reported that name in full in the status packet (§4). The longest name it
+  accepts is untested; the status packet's file-name field holds only 33
+  characters.
 - Path separator is backslash `\` (forward slash is not accepted).
 - The app only offers files whose extension is one of
   `.nc .txt .cnc .tap .eia .htg .wiz .gcode .ngc`.

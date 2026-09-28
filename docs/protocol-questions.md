@@ -42,9 +42,6 @@ These need a real controller; `protocol.md` records each as unverified.
    bytes 5–6. Does Masso Link compare them with anything?
 8. **Identity bytes 9–12.** What does the second 32-bit field of the identity
    reply mean, and is byte 12 always `0x40`?
-9. **33-character file names in status.** When the status packet's current file
-   name (§4) is exactly 33 characters, is byte 50 a NUL, or does the name run
-   into the reserved area?
 
 ## Folder uploads
 
@@ -55,6 +52,6 @@ These need a real controller; `protocol.md` records each as unverified.
 
 ## File names
 
-12. **File-name length.** Does the controller accept a file name longer than 15
-    characters (§5), and store the file under its full name? Masso Link checks
-    nothing narrower than 255 characters (§5.1).
+12. **File-name length.** The controller accepts names of at least 33 characters
+    (§5). What is the longest it accepts, and how does the status packet (§4),
+    whose field holds 33, show a longer one?
