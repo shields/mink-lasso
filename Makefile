@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build coverage fmt integration lint package probe run sim test version winres
+.PHONY: build coverage diagrams fmt integration lint package probe run sim test version winres
 
 GO_TEST_FLAGS ?= -race -count=1
 COVERAGE_FILE := coverage.out
@@ -20,7 +20,7 @@ EXE := dist/Mink Lasso.exe
 
 # Packages held to 100% statement coverage. The walk binding needs a Windows
 # desktop session and the main packages are one-liners, so they are excluded.
-COVER_PKGS := $(shell go list ./... | grep -v -e /cmd/ -e /internal/ui/walkui)
+COVER_PKGS = $(shell go list ./... | grep -v -e /cmd/ -e /internal/ui/walkui)
 
 # gitcalver.org: the committer date of HEAD in UTC, then the number of commits
 # reachable from HEAD that share that UTC date.
@@ -73,6 +73,19 @@ version:
 
 winres:
 	go tool go-winres make --in build/winres.json --out cmd/mink-lasso/rsrc --arch amd64
+
+MMDC_IMAGE := ghcr.io/mermaid-js/mermaid-cli/mermaid-cli:12.0.0@sha256:fa995339034aae7e5cd4f61482248b7f5c51be355b1a6f6eda11a2bbf8401f5f
+# The container runs as the caller so it can write to the checkout, and that
+# user needs a HOME that Chrome can write to.
+MMDC := docker run --rm -u "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/data" $(MMDC_IMAGE) -b transparent
+
+diagrams:
+	for f in docs/*.mmd; do \
+		[ -e "$$f" ] || continue; \
+		base=$${f%.mmd}; \
+		$(MMDC) -i "$$f" -o "$$base.svg" && \
+		$(MMDC) -i "$$f" -o "$$base-dark.svg" -t redux-dark-color || exit 1; \
+	done
 
 # The version exists only at build time, so the version resource is patched into
 # the exe instead of living in the committed .syso.

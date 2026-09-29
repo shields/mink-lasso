@@ -105,6 +105,17 @@ Versions follow [gitcalver](https://gitcalver.org/) (`YYYYMMDD.N`) and are
 computed by the Makefile from git history; releases are tagged `v0.YYYYMMDD.N`.
 There is nothing to bump.
 
+## Diagrams
+
+GitHub's own Mermaid rendering predates Mermaid 12, the first release to bundle
+the ELK layout engine, so diagrams are rendered here instead. Each is a
+`docs/*.mmd` file without configuration, taking Mermaid 12's defaults;
+`make diagrams` renders it in the pinned mermaid-cli container to
+`docs/<name>.svg` and `docs/<name>-dark.svg`, which are committed and shown
+through a `<picture>` element whose `alt` text restates the diagram. After
+editing a `.mmd`, run `make diagrams`, update the `alt` text to match, and
+commit all three files; CI renders them again and fails if the SVGs differ.
+
 ## Simulator and integration tests
 
 `make sim` runs a fake controller (`internal/masso/sim`) for development on any

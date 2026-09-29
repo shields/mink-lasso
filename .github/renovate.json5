@@ -17,6 +17,21 @@
   extends: ["config:best-practices", ":semanticCommitsDisabled"],
   platformAutomerge: true,
   postUpdateOptions: ["gomodTidy"],
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Update the mermaid-cli image that renders docs/*.mmd",
+      // managerFilePatterns replaces Renovate's deprecated fileMatch; its /…/
+      // entries are regexes, the rest globs.
+      managerFilePatterns: ["/^Makefile$/"],
+      // Each \\s below is already escaped: the regex Renovate compiles has \s.
+      matchStrings: [
+        "MMDC_IMAGE := (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})",
+      ],
+      datasourceTemplate: "docker",
+      versioningTemplate: "docker",
+    },
+  ],
   packageRules: [
     {
       description: "Automerge non-major updates",

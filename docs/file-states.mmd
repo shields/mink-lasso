@@ -1,0 +1,12 @@
+stateDiagram-v2
+    [*] --> Pending: file settles in the watched folder
+    [*] --> Rejected: file or folder name invalid
+    Pending --> Waiting: machine busy or controller unreachable
+    Waiting --> Pending
+    Pending --> Sending: nothing blocking it
+    Sending --> Sent: moved to sent/
+    Sending --> Failed: no response, no USB drive, write error, or canceled on the Masso
+    Failed --> Pending: retried after 5 s, 10 s, 30 s, then every 60 s
+    Failed --> Pending: file changes, or Retry clicked
+    Pending --> Dropped: file removed, or watch folder changed
+    Waiting --> Dropped: file removed, or watch folder changed

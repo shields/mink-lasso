@@ -42,20 +42,10 @@ broadcast, connects, and starts watching the folder.
 
 ## How it works
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: file settles in the watched folder
-    [*] --> Rejected: file or folder name invalid
-    Pending --> Waiting: machine busy or controller unreachable
-    Waiting --> Pending
-    Pending --> Sending: nothing blocking it
-    Sending --> Sent: moved to sent/
-    Sending --> Failed: no response, no USB drive, write error, or canceled on the Masso
-    Failed --> Pending: retried after 5 s, 10 s, 30 s, then every 60 s
-    Failed --> Pending: file changes, or Retry clicked
-    Pending --> Dropped: file removed, or watch folder changed
-    Waiting --> Dropped: file removed, or watch folder changed
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/file-states-dark.svg">
+  <img src="docs/file-states.svg" alt="State diagram of a file. A file that settles in the watched folder is Pending, or Rejected if its file or folder name is invalid. Pending goes to Waiting while the machine is busy or the controller unreachable, and Waiting goes back to Pending. Pending goes to Sending when nothing is blocking it. Pending and Waiting both go to Dropped if the file is removed or the watch folder changes. Sending ends in Sent, the file moved to sent/, or in Failed on no response, no USB drive, a write error, or a cancel on the Masso. Failed returns to Pending when retried after 5 s, 10 s, 30 s, then every 60 s, or when the file changes or Retry is clicked.">
+</picture>
 
 A file is sent when it has **settled**: its size and modification time have not
 changed for three seconds across two scans, and no other program has it open for
@@ -186,9 +176,10 @@ no GUI, exits with status 2.
 Everything goes through `make`: `make lint`, `make test`, `make coverage`
 (requires 100% statement coverage), `make build` (cross-compiles
 `dist/Mink Lasso.exe` from any OS; needs nothing but Go), `make package` (builds
-and packages the exe in `dist/mink-lasso.zip`; also needs `zip`), `make fmt`.
-Run `lefthook install` once after cloning so `make lint` runs before every
-commit.
+and packages the exe in `dist/mink-lasso.zip`; also needs `zip`), `make fmt`,
+`make diagrams` (renders each `docs/*.mmd` to the SVGs this file shows; needs
+Docker). Run `lefthook install` once after cloning so `make lint` runs before
+every commit.
 
 The GUI needs Windows, but everything else builds and tests on macOS and Linux.
 `make sim` runs a simulated controller and
