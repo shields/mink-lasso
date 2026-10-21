@@ -5,17 +5,33 @@
     "": {
       "devDependencies": {
         "prettier": "3.9.10",
-        "prettier-plugin-toml": "2.0.6",
+        "prettier-plugin-toml": "4.0.0",
       },
     },
   },
   "packages": {
-    "@taplo/core": ["@taplo/core@0.2.0", "", {}, "sha512-r8bl54Zj1In3QLkiW/ex694bVzpPJ9EhwqT9xkcUVODnVUGirdB1JTsmiIv0o1uwqZiwhi8xNnTOQBRQCpizrQ=="],
+    "@tombi-toml/lib": ["@tombi-toml/lib@1.8.9", "", { "optionalDependencies": { "@tombi-toml/lib-darwin-arm64": "1.8.9", "@tombi-toml/lib-darwin-x64": "1.8.9", "@tombi-toml/lib-linux-arm64": "1.8.9", "@tombi-toml/lib-linux-arm64-musl": "1.8.9", "@tombi-toml/lib-linux-x64": "1.8.9", "@tombi-toml/lib-linux-x64-musl": "1.8.9", "@tombi-toml/lib-win32-arm64": "1.8.9", "@tombi-toml/lib-win32-x64": "1.8.9" } }, "sha512-i3ZkTuy6LF35wnFBIYDHEpGcmyas3vF4K9yK4W/zzmVeFJAFirr8Xt6pwqN1jAWQMklRzoS1dt40dVafUFvxTg=="],
 
-    "@taplo/lib": ["@taplo/lib@0.5.0", "", { "dependencies": { "@taplo/core": "^0.2.0" } }, "sha512-+xIqpQXJco3T+VGaTTwmhxLa51qpkQxCjRwezjFZgr+l21ExlywJFcDfTrNmL6lG6tqb0h8GyJKO3UPGPtSCWg=="],
+    "@tombi-toml/lib-darwin-arm64": ["@tombi-toml/lib-darwin-arm64@1.8.9", "", { "os": "darwin", "cpu": "arm64" }, "sha512-CkOnHdOxsnZGsFOblMgwUzzO/ST6BrRLuR8P3YPBOzWYLI5I7Fd3mO6M6SZ68YO/x99MjvJvgIoET0aGogtiyQ=="],
+
+    "@tombi-toml/lib-darwin-x64": ["@tombi-toml/lib-darwin-x64@1.8.9", "", { "os": "darwin", "cpu": "x64" }, "sha512-xHTSgjtaTZ56K9BuFwZVu+lqQH73nOYlX2AHE969KPvkZw5Y47LS5QoA5jTlFBgYgbS94NkZe96i7+WJ8yX3iw=="],
+
+    "@tombi-toml/lib-linux-arm64": ["@tombi-toml/lib-linux-arm64@1.8.9", "", { "os": "linux", "cpu": "arm64" }, "sha512-zOGjPRvASlJSYlTThEyBb/7LQa+YprJyVkNbySbGtkatgbZsvVsVRCP6PP3Q+sVSUE0X2uC/nMzcKFZ8whTAmA=="],
+
+    "@tombi-toml/lib-linux-arm64-musl": ["@tombi-toml/lib-linux-arm64-musl@1.8.9", "", { "os": "linux", "cpu": "arm64" }, "sha512-6S2wN0Ui1h4afWCFVccPh9IlhmmS9GdBD+V4fiZBw2Tb4Y+JFfeKXouHwEeuoPsJ5YIH4woYOa2vipVxh4UbEQ=="],
+
+    "@tombi-toml/lib-linux-x64": ["@tombi-toml/lib-linux-x64@1.8.9", "", { "os": "linux", "cpu": "x64" }, "sha512-o6jnlUbUYUEc7+LbxjSLhI/DPVvAwH1UbBPjdY36F8TlZUt2331t68STSFIBjTeeZvaAj6fb5b7JtJfexwRTlA=="],
+
+    "@tombi-toml/lib-linux-x64-musl": ["@tombi-toml/lib-linux-x64-musl@1.8.9", "", { "os": "linux", "cpu": "x64" }, "sha512-z5PGpylyD9IuT0kb4UIb6izFHgLFnWs95CksYMfaIzsPDbvPzCC7DmMM5XkvTbBAuGj6qqvHVpr784XKot/6Xg=="],
+
+    "@tombi-toml/lib-win32-arm64": ["@tombi-toml/lib-win32-arm64@1.8.9", "", { "os": "win32", "cpu": "arm64" }, "sha512-uXq2vEMWljo/SDl8clEEfosZQQnehzeF5Eh0lzpStsATUI+vjGc/3TIiV64OQD1xMMVX2pxe1LAdORaBFqD37w=="],
+
+    "@tombi-toml/lib-win32-x64": ["@tombi-toml/lib-win32-x64@1.8.9", "", { "os": "win32", "cpu": "x64" }, "sha512-dxe404RoDVGEJCUtQtl04a7AwRXzlNEFeBoyl2wF4Fo96FsW5HlA4gSzjQyw/dsWnJudBxRWYpGX+P1wTUGKuQ=="],
 
     "prettier": ["prettier@3.9.10", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA=="],
 
-    "prettier-plugin-toml": ["prettier-plugin-toml@2.0.6", "", { "dependencies": { "@taplo/lib": "^0.5.0" }, "peerDependencies": { "prettier": "^3.0.3" } }, "sha512-12N/wBuHa9jd/KVy9pRP20NMKxQfQLMseQCt66lIbLaPLItvGUcSIryE1eZZMJ7loSws6Ig3M2Elc2EreNh76w=="],
+    "prettier-plugin-toml": ["prettier-plugin-toml@4.0.0", "", { "dependencies": { "@tombi-toml/lib": "^1.8.4", "smol-toml": "^1.8.0" }, "peerDependencies": { "prettier": "^3.0.3" } }, "sha512-kx4a0gdNKH40/NOj/gSkiRKqXmOq8hXb6fNWW6Txd3T0fyq+Wq8ly0qtjNoGGiLUPhvS/3PIRVyVJpzHw6RNwA=="],
+
+    "smol-toml": ["smol-toml@1.9.1", "", {}, "sha512-j7WyPdf0CJoutMzMoPLF/bVXHtKZIT9Rb4eGeEbWw8X2t5oirjPgpL+OpaENZrILYaXqYwnVH+qgUwVbl+pUJQ=="],
   }
 }
