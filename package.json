@@ -1,7 +1,7 @@
 {
   "type": "module",
   "devDependencies": {
-    "prettier": "^3.8.1",
-    "prettier-plugin-toml": "^2.0.6"
+    "prettier": "3.9.10",
+    "prettier-plugin-toml": "2.0.6"
   }
 }
