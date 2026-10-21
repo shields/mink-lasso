@@ -236,7 +236,6 @@ func TestSendFileToUnroutableSubfolderFailsImmediately(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // t.Chdir cannot be used in a parallel test.
 func TestSendFileMatchesRelativeWatchDir(t *testing.T) {
 	base := t.TempDir()
 	sub := mkdirAll(t, filepath.Join(base, "watch", "JOBS"))

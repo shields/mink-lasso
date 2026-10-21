@@ -569,16 +569,14 @@ func TestWriteConcurrent(t *testing.T) {
 	const goroutines = 8
 	const perGoroutine = 50
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
 	for range goroutines {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range perGoroutine {
 				if _, err := w.Write([]byte("x")); err != nil {
 					t.Error(err)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
