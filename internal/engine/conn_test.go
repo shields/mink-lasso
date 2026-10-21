@@ -400,7 +400,20 @@ func TestConnLostThenReconnectQueuedFileCompletes(t *testing.T) {
 	s := newConnTestSim(t, 446)
 	opts := schedTestOptions(t, 446, dir)
 	opts.Config.Address = s.Addr().String()
-	opts.NewClient = newConnTestNewClient(freeAdapterPort(t))
+	realNewClient := newConnTestNewClient(freeAdapterPort(t))
+	var rc *recordingClient
+	opts.NewClient = func(o masso.Options) (Client, error) {
+		c, err := realNewClient(o)
+		if err != nil {
+			return nil, err
+		}
+		rc = &recordingClient{
+			Client: c,
+			stub:   true,
+			found:  []masso.Found{{Addr: s.Addr(), Identity: masso.Identity{Serial: 446}}},
+		}
+		return rc, nil
+	}
 	opts.ClientOptions.LostAfter = 300 * time.Millisecond
 
 	e, err := New(opts)
@@ -419,6 +432,9 @@ func TestConnLostThenReconnectQueuedFileCompletes(t *testing.T) {
 		t.Errorf("Waiting message = %q, want %q", te.Message, "Not connected")
 	}
 
+	waitForEvent(t, events, func(ev Event) bool {
+		return isConnState(Connecting)(ev) && rc.discoverCalls() > 0
+	})
 	s.SetSilent(false)
 	waitForEvent(t, events, isConnState(Connected))
 	waitForEvent(t, events, isTransferEvent("E.NC", Sent))
