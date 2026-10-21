@@ -810,14 +810,8 @@ func TestUploadStrayIdentityDoesNotWedge(t *testing.T) {
 	}
 }
 
-// leaveTransferOpen starts, from a raw socket standing in for a client that
-// then died, an upload of a size-byte file named name, and sends it
-// chunks, the first MaxChunkData-sized slices of data, so the simulator
-// holds that transfer open. Its replies go to whichever Client last
-// connected, which has nothing waiting for them.
 func leaveTransferOpen(t *testing.T, s *sim.Controller, name string, data []byte, chunks int) {
 	t.Helper()
-	starts, chunkReqs := s.StartRequests(), s.ChunkRequests()
 	raw := rawConn(t)
 	pkt, err := masso.UploadStart(uint32(len(data)), "", name)
 	if err != nil {
@@ -832,21 +826,27 @@ func leaveTransferOpen(t *testing.T, s *sim.Controller, name string, data []byte
 		}
 		mustSend(t, raw, s.Addr(), pkt)
 	}
-	eventually(t, "the open transfer's packets to reach the simulator", func() bool {
-		return s.StartRequests() == starts+1 && s.ChunkRequests() == chunkReqs+chunks
-	})
+	if err := raw.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, masso.MaxPacket)
+	for range chunks + 1 {
+		if _, _, err := raw.ReadFromUDP(buf); err != nil {
+			t.Fatalf("ReadFromUDP: %v", err)
+		}
+	}
 }
 
 func TestUploadTransferLeftOpen(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 1})
+	data := testData(2*masso.MaxChunkData + 7)
+	leaveTransferOpen(t, s, "LEFT.NC", data, 1)
 	c := newTestClient(t, clock.Real{})
 	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	data := testData(2*masso.MaxChunkData + 7)
-	leaveTransferOpen(t, s, "LEFT.NC", data, 1)
 
 	err := c.Upload(ctx, "", "LEFT.NC", bytes.NewReader(data), int64(len(data)), nil)
 	if !errors.Is(err, masso.ErrTransferOpen) {
@@ -869,12 +869,12 @@ func TestUploadDisplacedTransferKeepsTheOtherFile(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	s := newSim(t, sim.Options{Serial: 1})
+	data := testData(10)
+	leaveTransferOpen(t, s, "DISPLACED.NC", data, 0)
 	c := newTestClient(t, clock.Real{})
 	if _, _, err := c.Connect(ctx, s.Addr()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	data := testData(10)
-	leaveTransferOpen(t, s, "DISPLACED.NC", data, 0)
 	if err := c.Upload(ctx, "", "OTHER.NC", bytes.NewReader(data), int64(len(data)), nil); err != nil {
 		t.Fatalf("Upload(OTHER.NC) = %v, want nil", err)
 	}
