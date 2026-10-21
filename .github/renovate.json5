@@ -15,6 +15,7 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["config:best-practices", ":semanticCommitsDisabled"],
+  lockFileMaintenance: { enabled: true, automerge: true },
   platformAutomerge: true,
   postUpdateOptions: ["gomodTidy"],
   customManagers: [
@@ -33,6 +34,12 @@
     },
   ],
   packageRules: [
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["golang"],
+      matchPackageNames: ["go"],
+      rangeStrategy: "bump",
+    },
     {
       description: "Automerge non-major updates",
       matchUpdateTypes: ["minor", "patch", "pin", "digest"],
