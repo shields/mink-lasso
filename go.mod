@@ -6,7 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/tailscale/walk v0.0.0-20260702185836-28b80ea70d3b
 	github.com/tailscale/win v0.0.0-20260619195133-2d76c33a64c1
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
