@@ -42,7 +42,7 @@ concurrency:
 jobs:
   diagrams:
     name: diagrams
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # mermaid-cli's headless Chromium can hang instead of failing.
     timeout-minutes: 15
     steps:
