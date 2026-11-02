@@ -74,7 +74,7 @@ version:
 winres:
 	go tool go-winres make --in build/winres.json --out cmd/mink-lasso/rsrc --arch amd64
 
-MMDC_IMAGE := ghcr.io/mermaid-js/mermaid-cli/mermaid-cli:12.0.1@sha256:b4e90c56d42f2ff2960b619456b9b876f6d9d2218593eace7d53f3fcbbdb5b23
+MMDC_IMAGE := ghcr.io/mermaid-js/mermaid-cli/mermaid-cli:12.0.1@sha256:18938e53497376d524e04b1fc0bf7b6d61a491ce9ff7032bb2855d57155acb10
 # The container runs as the caller so it can write to the checkout, and that
 # user needs a HOME that Chrome can write to.
 MMDC := docker run --rm -u "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/data" $(MMDC_IMAGE) -b transparent
