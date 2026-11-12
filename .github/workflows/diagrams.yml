@@ -36,7 +36,7 @@ permissions:
 
 # prettier-ignore
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -46,7 +46,7 @@ jobs:
     # mermaid-cli's headless Chromium can hang instead of failing.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       # --intent-to-add lets the diff see SVGs for a diagram that has none

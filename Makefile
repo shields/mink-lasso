@@ -46,7 +46,7 @@ GOLANGCI := $(TOOLS)/golangci-lint$(HOST_EXE)
 $(GOLANGCI): go.mod go.sum
 	go build -o $@ github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 
-lint: $(GOLANGCI)
+lint: actions-lock-verify-local $(GOLANGCI)
 	go mod tidy -diff
 	$(GOLANGCI) run ./...
 	GOOS=windows $(GOLANGCI) run ./...
@@ -115,3 +115,17 @@ integration: build
 # probes" section.
 probe:
 	MINK_LASSO_PROBE=1 go test -tags integration -run '^TestProbe$$' -count=1 -v -timeout 30m ./internal/integration/...
+
+.PHONY: actions-lock-install actions-lock actions-lock-verify-local actions-lock-verify
+
+actions-lock-install:
+	gh extension install github/gh-actions-lock --pin v0.4.1 --force
+
+actions-lock:
+	gh actions-lock --no-interactive
+
+actions-lock-verify-local:
+	gh actions-lock --verify-local
+
+actions-lock-verify:
+	gh actions-lock --verify

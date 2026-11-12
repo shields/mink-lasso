@@ -14,10 +14,11 @@
 
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  extends: ["config:best-practices", ":semanticCommitsDisabled"],
+  extends: [
+    "github>shields/right-answers//renovate/base.json5",
+    "github>shields/right-answers//renovate/go.json5",
+  ],
   lockFileMaintenance: { enabled: true, automerge: true },
-  platformAutomerge: true,
-  postUpdateOptions: ["gomodTidy"],
   customManagers: [
     {
       customType: "regex",
@@ -39,16 +40,6 @@
       matchDepTypes: ["golang"],
       matchPackageNames: ["go"],
       rangeStrategy: "bump",
-    },
-    {
-      description: "Automerge non-major updates",
-      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
-      automerge: true,
-    },
-    {
-      description: "Automerge dev dependencies",
-      matchDepTypes: ["devDependencies"],
-      automerge: true,
     },
   ],
 }
